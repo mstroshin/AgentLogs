@@ -30,6 +30,7 @@ public enum DatabasePath: Sendable {
         return base.appendingPathComponent("agent-logs.sqlite").path
     }
 
+    #if os(macOS)
     public static func simulatorDatabasePaths() -> [String] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let devicesDir = home
@@ -66,4 +67,5 @@ public enum DatabasePath: Sendable {
 
         return paths
     }
+    #endif
 }
