@@ -1,44 +1,47 @@
 # AgentLogs — Tasks
 
 ## Phase 1: Фундамент
-- [ ] Package.swift с тремя таргетами и зависимостями
-- [ ] Модели данных: Session, LogEntry, HTTPEntry, LogType, LogCategory
-- [ ] DatabaseSetup: миграции, создание DatabaseQueue
-- [ ] DatabasePath: определение пути к SQLite (симулятор / устройство)
+- [x] Package.swift с тремя таргетами и зависимостями
+- [x] Модели данных: Session, LogEntry, HTTPEntry, LogLevel, LogCategory
+- [x] DatabaseSetup: миграции, создание DatabaseQueue
+- [x] DatabasePath: определение пути к SQLite (симулятор / устройство)
 
 ## Phase 2: SDK — сбор логов
-- [ ] AgentLogs.swift: публичный API — `start()`, `log()`
-- [ ] Configuration.swift
-- [ ] SessionManager: создание/завершение сессии, крэш-хендлинг
-- [ ] LogBuffer: батчинг записей (500ms / 50 записей)
-- [ ] HTTPCollector: URLProtocol перехват
-- [ ] SystemLogCollector: stdout/stderr через dup2
-- [ ] OSLogCollector: OSLogStore polling
+- [x] AgentLogs.swift: публичный API — `start()`, `log()`
+- [x] Configuration.swift
+- [x] SessionManager: создание/завершение сессии, крэш-хендлинг
+- [x] LogBuffer: батчинг записей (500ms / 50 записей)
+- [x] HTTPCollector: URLProtocol перехват
+- [x] SystemLogCollector: stdout/stderr через dup2
+- [x] OSLogCollector: OSLogStore polling
 
 ## Phase 3: CLI — базовые команды
-- [ ] main.swift + swift-argument-parser
-- [ ] LogDataSource протокол
-- [ ] SQLiteDataSource: чтение базы с диска
-- [ ] SimulatorDiscovery: поиск SQLite баз симуляторов
-- [ ] SessionsCommand
-- [ ] LogsCommand
-- [ ] TailCommand
-- [ ] HTTPCommand
-- [ ] SearchCommand
-- [ ] Форматтеры: HumanFormatter, JSONFormatter, ToonFormatter
+- [x] main.swift + swift-argument-parser
+- [x] LogDataSource протокол
+- [x] SQLiteDataSource: чтение базы с диска
+- [x] SimulatorDiscovery: поиск SQLite баз симуляторов
+- [x] SessionsCommand
+- [x] LogsCommand
+- [x] TailCommand
+- [x] HTTPCommand
+- [x] SearchCommand
+- [x] Форматтеры: HumanFormatter, JSONFormatter, ToonFormatter
 
 ## Phase 4: Физическое устройство
-- [ ] BonjourServer: Swift NIO HTTP-сервер в SDK
-- [ ] BonjourAdvertiser: анонс через NetService
-- [ ] NetworkDataSource: HTTP-клиент в CLI
-- [ ] BonjourDiscovery: обнаружение устройств
-- [ ] DevicesCommand
+- [x] BonjourServer: Swift NIO HTTP-сервер в SDK
+- [x] BonjourAdvertiser: анонс через NetService
+- [x] NetworkDataSource: HTTP-клиент в CLI
+- [x] BonjourDiscovery: обнаружение устройств
+- [x] DevicesCommand
 
 ## Phase 5: Интеграция с Claude Code
-- [ ] Skill файл: .claude/skills/agent-logs.md
-- [ ] Документация по установке и настройке
+- [x] Skill файл: .claude/skills/agent-logs.md
+- [x] Документация по установке и настройке (README.md)
 
 ## Phase 6: Тесты
-- [ ] AgentLogsCoreTests: модели, миграции, запросы
-- [ ] AgentLogsSDKTests: коллекторы, буфер, сессии
-- [ ] AgentLogsCLITests: команды, форматтеры
+- [x] AgentLogsCoreTests: модели, миграции, запросы (34 теста)
+- [x] AgentLogsSDKTests: конфигурация, буфер (9 тестов)
+- [x] AgentLogsCLITests: форматтеры (36 тестов)
+
+## Дополнительно
+- [x] Исправлен UUID storage: консистентное TEXT хранение вместо BLOB
