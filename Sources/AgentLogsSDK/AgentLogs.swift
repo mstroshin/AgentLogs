@@ -83,6 +83,11 @@ public final class AgentLogs: Sendable {
             sessionManager?.sessionID
         }
 
+        func uiContext() -> (NSManagedObjectContext, UUID)? {
+            guard isRunning, let container, let sm = sessionManager else { return nil }
+            return (container.viewContext, sm.sessionID)
+        }
+
         private func logLevelOrder(_ level: LogLevel) -> Int {
             switch level {
             case .debug: return 0
@@ -99,6 +104,12 @@ public final class AgentLogs: Sendable {
     private init() {}
 
     // MARK: - Public API
+
+    /// Returns the CoreData view context and current session ID for UI consumption.
+    /// Returns nil if the SDK is not running.
+    public static func uiContext() async -> (context: NSManagedObjectContext, sessionID: UUID)? {
+        await state.uiContext()
+    }
 
     /// Start the AgentLogs SDK with the given configuration.
     public static func start(config: Configuration = Configuration()) {

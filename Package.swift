@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "AgentLogsCore", targets: ["AgentLogsCore"]),
         .library(name: "AgentLogsSDK", targets: ["AgentLogsSDK"]),
+        .library(name: "AgentLogsUI", targets: ["AgentLogsUI"]),
         .library(name: "AgentLogsGRDBPlugin", targets: ["AgentLogsGRDBPlugin"]),
         .executable(name: "agent-logs", targets: ["AgentLogsCLI"]),
     ],
@@ -33,6 +34,15 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
+        ),
+
+        // MARK: - UI (SwiftUI log viewer)
+        .target(
+            name: "AgentLogsUI",
+            dependencies: [
+                "AgentLogsCore",
+                "AgentLogsSDK",
             ]
         ),
 
