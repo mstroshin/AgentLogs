@@ -1,30 +1,30 @@
 # AgentLogs
 
-Swift-библиотека для сбора логов iOS/macOS приложений с доступом через CLI для Claude Code.
+A Swift library that collects iOS/macOS app logs and exposes them via CLI for Claude Code debugging.
 
-## Что это
+## What is it
 
-AgentLogs автоматически собирает HTTP-трафик, системные логи (`print`, `os_log`) и кастомные сообщения в SQLite базу. CLI-утилита `agent-logs` позволяет Claude Code читать эти логи и помогать в дебаге.
+AgentLogs automatically captures HTTP traffic, system logs (`print`, `os_log`), and custom messages into a SQLite database. The `agent-logs` CLI lets Claude Code read these logs and assist with debugging.
 
-## Требования
+## Requirements
 
 - iOS 15+ / macOS 12+
 - Swift 6.1+
 - Xcode 16+
 
-## Установка
+## Installation
 
 ### Swift Package Manager
 
-Добавьте в `Package.swift`:
+Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/your-repo/AgentLogs", from: "1.0.0"),
+    .package(url: "https://github.com/mstroshin/AgentLogs", from: "1.0.0"),
 ]
 ```
 
-Подключите SDK к таргету приложения:
+Add the SDK to your app target:
 
 ```swift
 .target(
@@ -35,145 +35,145 @@ dependencies: [
 )
 ```
 
-## Быстрый старт
+## Quick Start
 
-### 1. Подключите SDK в приложении
+### 1. Integrate the SDK
 
 ```swift
 import AgentLogsSDK
 
-// При запуске приложения
+// On app launch
 AgentLogs.start()
 
-// Логирование
+// Log messages
 AgentLogs.log("User tapped login button")
 AgentLogs.log("Failed to load profile", type: .error)
 AgentLogs.log("Cache miss", type: .warning, file: #file, line: #line)
 
-// При завершении (опционально — SDK обрабатывает завершение автоматически)
+// On termination (optional — SDK handles shutdown automatically)
 AgentLogs.stop()
 ```
 
-### 2. Установите CLI
+### 2. Install the CLI
 
 ```bash
-# Из корня репозитория
+# From the repository root
 swift build -c release --product agent-logs
 
-# Скопируйте в PATH
+# Copy to PATH
 cp .build/release/agent-logs /usr/local/bin/
 ```
 
-### 3. Настройте Claude Code Skill
+### 3. Set Up the Claude Code Skill
 
-Скопируйте файл `.claude/skills/agent-logs.md` в ваш проект. Claude Code будет автоматически использовать CLI при дебаге.
+Copy `.claude/skills/agent-logs.md` into your project. Claude Code will automatically use the CLI when debugging.
 
 ## SDK
 
-### Конфигурация
+### Configuration
 
 ```swift
 AgentLogs.start(config: .init(
-    enableHTTPCapture: true,       // Перехват URLSession запросов
-    enableSystemLogCapture: true,  // Перехват stdout/stderr (print)
-    enableOSLogCapture: true,      // Чтение OSLog
-    logLevel: .debug,              // Минимальный уровень логирования
-    databasePath: nil              // nil = стандартный путь
+    enableHTTPCapture: true,       // Intercept URLSession requests
+    enableSystemLogCapture: true,  // Capture stdout/stderr (print)
+    enableOSLogCapture: true,      // Read OSLog entries
+    logLevel: .debug,              // Minimum log level to record
+    databasePath: nil              // nil = default path
 ))
 ```
 
 ### API
 
-Один метод для всех логов:
+A single method for all logs:
 
 ```swift
 AgentLogs.log(_ message: String, type: LogLevel = .info, file: String = #file, line: Int = #line)
 ```
 
-Уровни: `.debug`, `.info`, `.warning`, `.error`, `.critical`
+Levels: `.debug`, `.info`, `.warning`, `.error`, `.critical`
 
-### Что собирается автоматически
+### Auto-Captured Data
 
-| Категория | Источник | Как работает |
-|-----------|----------|--------------|
-| `http` | URLSession | URLProtocol перехватывает все запросы |
-| `system` | print() | dup2 + Pipe перенаправляет stdout/stderr |
-| `oslog` | os_log | Polling OSLogStore каждые 2 секунды |
-| `custom` | AgentLogs.log() | Прямой вызов API |
+| Category | Source | How it works |
+|----------|--------|--------------|
+| `http` | URLSession | URLProtocol intercepts all requests |
+| `system` | print() | dup2 + Pipe redirects stdout/stderr |
+| `oslog` | os_log | Polls OSLogStore every 2 seconds |
+| `custom` | AgentLogs.log() | Direct API call |
 
-### Conditional compilation
+### Conditional Compilation
 
-SDK активен только в Debug-сборках. Для включения в Release добавьте флаг:
+The SDK is active only in Debug builds. To enable in Release, add a compiler flag:
 
 ```swift
-// В Build Settings → Swift Compiler - Custom Flags
+// Build Settings → Swift Compiler - Custom Flags
 -D AGENTLOGS_ENABLED
 ```
 
-### Физическое устройство
+### Physical Devices
 
-На физическом устройстве SDK автоматически поднимает HTTP-сервер и публикует его через Bonjour (`_agentlogs._tcp`). CLI обнаруживает устройство по сети.
+On a physical device, the SDK automatically starts an HTTP server and advertises it via Bonjour (`_agentlogs._tcp`). The CLI discovers the device over the local network.
 
 ## CLI
 
-### Команды
+### Commands
 
 ```bash
-# Список сессий
+# List sessions
 agent-logs sessions
 agent-logs sessions --crashed
 
-# Логи сессии
-agent-logs logs latest                       # последняя сессия
-agent-logs logs <session-id> --level error   # только ошибки
-agent-logs logs <session-id> --category http # только HTTP
+# View session logs
+agent-logs logs latest                       # most recent session
+agent-logs logs <session-id> --level error   # errors only
+agent-logs logs <session-id> --category http # HTTP only
 
-# Real-time мониторинг
+# Real-time monitoring
 agent-logs tail
 agent-logs tail <session-id>
 
-# Детали HTTP запроса
+# HTTP request details
 agent-logs http <log-entry-id>
 
-# Поиск
+# Search
 agent-logs search "timeout"
 agent-logs search "500" --category http
 
-# Обнаружение устройств
+# Device discovery
 agent-logs devices
 ```
 
-### Форматы вывода
+### Output Formats
 
-**Human-readable** (по умолчанию):
+**Human-readable** (default):
 ```
 [14:32:01] ERROR [HTTP] POST /api/users -> 500 (234ms)
 [14:32:01] ERROR [Custom] Failed to parse user response
            at UserService.swift:42
 ```
 
-**Token-optimized** (`--toon`) — для Claude Code:
+**Token-optimized** (`--toon`) — designed for Claude Code:
 ```
 14:32:01|ERR|http|POST /api/users->500 234ms
 14:32:01|ERR|cst|Parse fail@UserService.swift:42
 ```
 
-**JSON** (`--json`) — для скриптов и интеграций.
+**JSON** (`--json`) — for scripts and integrations.
 
-### Подключение к базе данных
+### Database Connection
 
 ```bash
-# Автоопределение (ищет базы симуляторов)
+# Auto-discovery (searches simulator databases)
 agent-logs sessions
 
-# Указать путь явно
+# Explicit path
 agent-logs sessions --db-path ~/path/to/agent-logs.sqlite
 
-# Подключение к физическому устройству
+# Connect to a physical device
 agent-logs sessions --remote 192.168.1.42:8080
 ```
 
-## Архитектура
+## Architecture
 
 ```
 ┌─────────────────────────────┐
@@ -201,25 +201,25 @@ agent-logs sessions --remote 192.168.1.42:8080
               ▼
 ┌─────────────────────────────┐
 │     agent-logs CLI          │
-│  (читает SQLite / Bonjour)  │
+│  (reads SQLite / Bonjour)   │
 └──────────────┬──────────────┘
                │
                ▼
 ┌─────────────────────────────┐
 │       Claude Code           │
-│    (через Bash + Skill)     │
+│     (via Bash + Skill)      │
 └─────────────────────────────┘
 ```
 
-### Структура пакета
+### Package Structure
 
 ```
 Sources/
-├── AgentLogsCore/    — модели, БД, запросы (GRDB)
-├── AgentLogsSDK/     — SDK для приложения (коллекторы, буфер, Bonjour-сервер)
-└── AgentLogsCLI/     — CLI утилита (команды, форматтеры, data sources)
+├── AgentLogsCore/    — Models, database, queries (GRDB)
+├── AgentLogsSDK/     — App SDK (collectors, buffer, Bonjour server)
+└── AgentLogsCLI/     — CLI tool (commands, formatters, data sources)
 ```
 
-## Лицензия
+## License
 
 MIT
