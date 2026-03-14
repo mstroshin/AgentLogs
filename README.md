@@ -1,10 +1,10 @@
 # AgentLogs
 
-A Swift library that collects iOS/macOS app logs and exposes them via CLI for Claude Code debugging.
+A Swift library that collects iOS/macOS app logs and exposes them via a built-in UI viewer and CLI for debugging.
 
 ## What is it
 
-AgentLogs automatically captures HTTP traffic, system logs (`print`, `os_log`), and custom messages into a SQLite database. The `agent-logs` CLI lets Claude Code read these logs and assist with debugging.
+AgentLogs automatically captures HTTP traffic, system logs (`print`, `os_log`), and custom messages into a CoreData store. View logs on-device with `AgentLogs.showUI()`, or use the `agent-logs` CLI for Claude Code debugging.
 
 ## Requirements
 
@@ -20,17 +20,18 @@ Add to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/mstroshin/AgentLogs", from: "1.0.0"),
+    .package(url: "https://github.com/mstroshin/AgentLogs", from: "2.0.0"),
 ]
 ```
 
-Add the SDK to your app target:
+Add the products you need:
 
 ```swift
 .target(
     name: "MyApp",
     dependencies: [
         .product(name: "AgentLogsSDK", package: "AgentLogs"),
+        .product(name: "AgentLogsUI", package: "AgentLogs"),  // optional, iOS only
     ]
 )
 ```
@@ -48,23 +49,43 @@ AgentLogs.start()
 // Log messages
 AgentLogs.log("User tapped login button")
 AgentLogs.log("Failed to load profile", type: .error)
-AgentLogs.log("Cache miss", type: .warning, file: #file, line: #line)
 
 // On termination (optional — SDK handles shutdown automatically)
 AgentLogs.stop()
 ```
 
-### 2. Install the CLI
+### 2. View Logs On-Device (iOS)
+
+```swift
+import AgentLogsUI
+
+// Show the log viewer from anywhere — button, shake handler, debug menu
+AgentLogs.showUI()
+```
+
+Or present as a SwiftUI sheet:
+
+```swift
+.sheet(isPresented: $showLogs) {
+    AgentLogsView()
+}
+```
+
+The built-in viewer provides:
+- Live-updating log list with color-coded severity levels
+- Category and level filters
+- Full-text search
+- Log detail view with source location
+- HTTP request/response inspector
+
+### 3. Install the CLI
 
 ```bash
-# From the repository root
 swift build -c release --product agent-logs
-
-# Copy to PATH
 cp .build/release/agent-logs /usr/local/bin/
 ```
 
-### 3. Set Up the Claude Code Skill
+### 4. Set Up the Claude Code Skill
 
 Copy `.claude/skills/agent-logs.md` into your project. Claude Code will automatically use the CLI when debugging.
 
@@ -74,17 +95,62 @@ Copy `.claude/skills/agent-logs.md` into your project. Claude Code will automati
 
 ```swift
 AgentLogs.start(config: .init(
-    enableHTTPCapture: true,       // Intercept URLSession requests
-    enableSystemLogCapture: true,  // Capture stdout/stderr (print)
-    enableOSLogCapture: true,      // Read OSLog entries
-    logLevel: .debug,              // Minimum log level to record
-    databasePath: nil              // nil = default path
+    collectors: Configuration.defaultCollectors(),  // HTTP + System + OSLog
+    logLevel: .debug,
+    databasePath: nil  // nil = default path
 ))
 ```
 
-### API
+Customize collectors:
 
-A single method for all logs:
+```swift
+AgentLogs.start(config: .init(
+    collectors: [HTTPCollector(), OSLogCollector()],  // no stdout capture
+    logLevel: .warning
+))
+```
+
+### Plugin System
+
+The SDK uses a `LogCollector` protocol. Built-in collectors (HTTP, System, OSLog) and external plugins conform to the same interface:
+
+```swift
+public protocol LogCollector: Sendable {
+    var category: LogCategory { get }
+    func start(context: CollectorContext) async
+    func stop() async
+}
+```
+
+**GRDB Plugin** — optional target for monitoring SQL queries in apps using GRDB:
+
+```swift
+// Package.swift
+.product(name: "AgentLogsGRDBPlugin", package: "AgentLogs"),
+
+// Usage
+import AgentLogsGRDBPlugin
+
+let plugin = GRDBPlugin()
+plugin.installTrace(in: &dbConfig)
+
+AgentLogs.start(config: .init(
+    collectors: Configuration.defaultCollectors() + [plugin]
+))
+```
+
+### Extensible Categories
+
+`LogCategory` is an open struct — plugins define their own:
+
+```swift
+extension LogCategory {
+    public static let sqlite = LogCategory(rawValue: "sqlite")
+    public static let analytics = LogCategory(rawValue: "analytics")
+}
+```
+
+### API
 
 ```swift
 AgentLogs.log(_ message: String, type: LogLevel = .info, file: String = #file, line: Int = #line)
@@ -99,11 +165,11 @@ Levels: `.debug`, `.info`, `.warning`, `.error`, `.critical`
 | `http` | URLSession | URLProtocol intercepts all requests |
 | `system` | print() | dup2 + Pipe redirects stdout/stderr |
 | `oslog` | os_log | Polls OSLogStore every 2 seconds |
-| `custom` | AgentLogs.log() | Direct API call |
+| `manualLogs` | AgentLogs.log() | Direct API call |
 
 ### Conditional Compilation
 
-The SDK is active only in Debug builds. To enable in Release, add a compiler flag:
+The SDK is active only in Debug builds. To enable in Release:
 
 ```swift
 // Build Settings → Swift Compiler - Custom Flags
@@ -124,9 +190,9 @@ agent-logs sessions
 agent-logs sessions --crashed
 
 # View session logs
-agent-logs logs latest                       # most recent session
-agent-logs logs <session-id> --level error   # errors only
-agent-logs logs <session-id> --category http # HTTP only
+agent-logs logs latest
+agent-logs logs <session-id> --level error
+agent-logs logs <session-id> --category http
 
 # Real-time monitoring
 agent-logs tail
@@ -148,14 +214,14 @@ agent-logs devices
 **Human-readable** (default):
 ```
 [14:32:01] ERROR [HTTP] POST /api/users -> 500 (234ms)
-[14:32:01] ERROR [Custom] Failed to parse user response
+[14:32:01] ERROR [MANUALLOGS] Failed to parse user response
            at UserService.swift:42
 ```
 
 **Token-optimized** (`--toon`) — designed for Claude Code:
 ```
 14:32:01|ERR|http|POST /api/users->500 234ms
-14:32:01|ERR|cst|Parse fail@UserService.swift:42
+14:32:01|ERR|man|Parse fail@UserService.swift:42
 ```
 
 **JSON** (`--json`) — for scripts and integrations.
@@ -176,48 +242,54 @@ agent-logs sessions --remote 192.168.1.42:8080
 ## Architecture
 
 ```
-┌─────────────────────────────┐
-│       iOS/macOS App         │
-│                             │
-│  ┌───────────────────────┐  │
-│  │    AgentLogsSDK       │  │
-│  │  ┌─────────────────┐  │  │
-│  │  │  HTTPCollector   │  │  │
-│  │  │  SystemCollector │  │  │
-│  │  │  OSLogCollector  │  │  │
-│  │  │  Custom logs     │  │  │
-│  │  └────────┬────────┘  │  │
-│  │           │           │  │
-│  │     ┌─────▼─────┐    │  │
-│  │     │ LogBuffer  │    │  │
-│  │     └─────┬─────┘    │  │
-│  │           │           │  │
-│  │     ┌─────▼─────┐    │  │
-│  │     │  SQLite    │    │  │
-│  │     └───────────┘    │  │
-│  └───────────────────────┘  │
-└─────────────────────────────┘
+┌─────────────────────────────────┐
+│         iOS/macOS App           │
+│                                 │
+│  ┌───────────────────────────┐  │
+│  │      AgentLogsSDK         │  │
+│  │  ┌─────────────────────┐  │  │
+│  │  │   LogCollectors     │  │  │
+│  │  │  HTTP · System · OS │  │  │
+│  │  │  + custom plugins   │  │  │
+│  │  └──────────┬──────────┘  │  │
+│  │             │              │  │
+│  │       ┌─────▼─────┐       │  │
+│  │       │ LogBuffer  │       │  │
+│  │       └─────┬─────┘       │  │
+│  │             │              │  │
+│  │       ┌─────▼─────┐       │  │
+│  │       │  CoreData  │       │  │
+│  │       └───────────┘       │  │
+│  └───────────────────────────┘  │
+│                                 │
+│  ┌───────────────────────────┐  │
+│  │     AgentLogsUI (iOS)     │  │
+│  │  AgentLogs.showUI()       │  │
+│  └───────────────────────────┘  │
+└─────────────────────────────────┘
               │
               ▼
-┌─────────────────────────────┐
-│     agent-logs CLI          │
-│  (reads SQLite / Bonjour)   │
-└──────────────┬──────────────┘
+┌─────────────────────────────────┐
+│       agent-logs CLI            │
+│  (reads CoreData / Bonjour)    │
+└──────────────┬──────────────────┘
                │
                ▼
-┌─────────────────────────────┐
-│       Claude Code           │
-│     (via Bash + Skill)      │
-└─────────────────────────────┘
+┌─────────────────────────────────┐
+│         Claude Code             │
+│       (via Bash + Skill)        │
+└─────────────────────────────────┘
 ```
 
 ### Package Structure
 
 ```
 Sources/
-├── AgentLogsCore/    — Models, database, queries (GRDB)
-├── AgentLogsSDK/     — App SDK (collectors, buffer, Bonjour server)
-└── AgentLogsCLI/     — CLI tool (commands, formatters, data sources)
+├── AgentLogsCore/       — Models, CoreData schema, queries
+├── AgentLogsSDK/        — App SDK (collectors, buffer, Bonjour server)
+├── AgentLogsUI/         — SwiftUI log viewer (iOS)
+├── AgentLogsGRDBPlugin/ — Optional GRDB trace plugin
+└── AgentLogsCLI/        — CLI tool (commands, formatters, data sources)
 ```
 
 ## License
