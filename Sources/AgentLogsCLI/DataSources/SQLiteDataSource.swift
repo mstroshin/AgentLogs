@@ -1,51 +1,62 @@
 import Foundation
-import GRDB
+import CoreData
 import AgentLogsCore
 
-struct SQLiteDataSource: LogDataSource, Sendable {
-    let dbQueue: DatabaseQueue
-
-    init(dbQueue: DatabaseQueue) {
-        self.dbQueue = dbQueue
-    }
+struct CoreDataDataSource: LogDataSource, Sendable {
+    let container: NSPersistentContainer
 
     init(path: String) throws {
-        self.dbQueue = try DatabaseSetup.openDatabase(at: path)
+        let storeURL = URL(fileURLWithPath: path)
+        let container = CoreDataStack.createContainer(at: storeURL)
+
+        var loadError: Error?
+        container.loadPersistentStores { _, error in
+            loadError = error
+        }
+        if let loadError { throw loadError }
+
+        self.container = container
     }
 
     func fetchSessions(crashedOnly: Bool, limit: Int) throws -> [Session] {
-        try dbQueue.read { db in
-            try LogQueries.fetchSessions(db: db, crashedOnly: crashedOnly, limit: limit)
+        let context = container.viewContext
+        return try context.performAndWait {
+            try LogQueries.fetchSessions(context: context, crashedOnly: crashedOnly, limit: limit)
         }
     }
 
     func fetchLogs(sessionID: UUID, category: LogCategory?, level: LogLevel?, limit: Int) throws -> [LogEntry] {
-        try dbQueue.read { db in
-            try LogQueries.fetchLogs(db: db, sessionID: sessionID, category: category, level: level, limit: limit)
+        let context = container.viewContext
+        return try context.performAndWait {
+            try LogQueries.fetchLogs(context: context, sessionID: sessionID, category: category, level: level, limit: limit)
         }
     }
 
     func tailLogs(sessionID: UUID, afterID: Int) throws -> [LogEntry] {
-        try dbQueue.read { db in
-            try LogQueries.tailLogs(db: db, sessionID: sessionID, afterID: afterID)
+        let context = container.viewContext
+        return try context.performAndWait {
+            try LogQueries.tailLogs(context: context, sessionID: sessionID, afterID: afterID)
         }
     }
 
     func fetchHTTPEntry(logEntryID: Int) throws -> HTTPEntry? {
-        try dbQueue.read { db in
-            try LogQueries.fetchHTTPEntry(db: db, logEntryID: logEntryID)
+        let context = container.viewContext
+        return try context.performAndWait {
+            try LogQueries.fetchHTTPEntry(context: context, logEntryID: logEntryID)
         }
     }
 
     func searchLogs(query: String, sessionID: UUID?, category: LogCategory?, level: LogLevel?, limit: Int) throws -> [LogEntry] {
-        try dbQueue.read { db in
-            try LogQueries.searchLogs(db: db, query: query, sessionID: sessionID, category: category, level: level, limit: limit)
+        let context = container.viewContext
+        return try context.performAndWait {
+            try LogQueries.searchLogs(context: context, query: query, sessionID: sessionID, category: category, level: level, limit: limit)
         }
     }
 
     func latestSessionID() throws -> UUID? {
-        try dbQueue.read { db in
-            try LogQueries.latestSessionID(db: db)
+        let context = container.viewContext
+        return try context.performAndWait {
+            try LogQueries.latestSessionID(context: context)
         }
     }
 }

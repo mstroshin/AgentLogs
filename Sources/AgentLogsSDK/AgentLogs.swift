@@ -1,5 +1,5 @@
 import Foundation
-import GRDB
+import CoreData
 import AgentLogsCore
 
 /// Main public API for the AgentLogs SDK.
@@ -17,34 +17,28 @@ public final class AgentLogs: Sendable {
 
     /// All mutable state is protected by this actor.
     private actor State {
-        var dbQueue: DatabaseQueue?
+        var container: NSPersistentContainer?
         var sessionManager: SessionManager?
         var logBuffer: LogBuffer?
-        var httpCollector: HTTPCollector?
-        var systemLogCollector: SystemLogCollector?
-        var osLogCollector: OSLogCollector?
+        var collectors: [any LogCollector] = []
         var bonjourServer: BonjourServer?
         var bonjourAdvertiser: BonjourAdvertiser?
         var configuration: Configuration?
         var isRunning = false
 
         func setRunning(
-            dbQueue: DatabaseQueue,
+            container: NSPersistentContainer,
             sessionManager: SessionManager,
             logBuffer: LogBuffer,
-            httpCollector: HTTPCollector?,
-            systemLogCollector: SystemLogCollector?,
-            osLogCollector: OSLogCollector?,
+            collectors: [any LogCollector],
             bonjourServer: BonjourServer?,
             bonjourAdvertiser: BonjourAdvertiser?,
             configuration: Configuration
         ) {
-            self.dbQueue = dbQueue
+            self.container = container
             self.sessionManager = sessionManager
             self.logBuffer = logBuffer
-            self.httpCollector = httpCollector
-            self.systemLogCollector = systemLogCollector
-            self.osLogCollector = osLogCollector
+            self.collectors = collectors
             self.bonjourServer = bonjourServer
             self.bonjourAdvertiser = bonjourAdvertiser
             self.configuration = configuration
@@ -54,27 +48,21 @@ public final class AgentLogs: Sendable {
         func teardown() -> (
             sessionManager: SessionManager?,
             logBuffer: LogBuffer?,
-            httpCollector: HTTPCollector?,
-            systemLogCollector: SystemLogCollector?,
-            osLogCollector: OSLogCollector?,
+            collectors: [any LogCollector],
             bonjourServer: BonjourServer?,
             bonjourAdvertiser: BonjourAdvertiser?
         ) {
             let result = (
                 sessionManager: sessionManager,
                 logBuffer: logBuffer,
-                httpCollector: httpCollector,
-                systemLogCollector: systemLogCollector,
-                osLogCollector: osLogCollector,
+                collectors: collectors,
                 bonjourServer: bonjourServer,
                 bonjourAdvertiser: bonjourAdvertiser
             )
-            self.dbQueue = nil
+            self.container = nil
             self.sessionManager = nil
             self.logBuffer = nil
-            self.httpCollector = nil
-            self.systemLogCollector = nil
-            self.osLogCollector = nil
+            self.collectors = []
             self.bonjourServer = nil
             self.bonjourAdvertiser = nil
             self.configuration = nil
@@ -113,7 +101,6 @@ public final class AgentLogs: Sendable {
     // MARK: - Public API
 
     /// Start the AgentLogs SDK with the given configuration.
-    /// Opens the database, creates a session, and starts all enabled collectors.
     public static func start(config: Configuration = Configuration()) {
         #if DEBUG || AGENTLOGS_ENABLED
         Task {
@@ -151,41 +138,45 @@ public final class AgentLogs: Sendable {
         guard await !state.isRunning else { return }
 
         do {
-            // Open database
-            let dbPath = config.databasePath ?? DatabasePath.defaultPath()
-            let dbQueue = try DatabaseSetup.openDatabase(at: dbPath)
+            // Setup CoreData
+            let storePath = config.databasePath ?? DatabasePath.defaultPath()
+            let storeURL = URL(fileURLWithPath: storePath)
+
+            // Ensure directory exists
+            let directory = storeURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+            let container = CoreDataStack.createContainer(at: storeURL)
+
+            // Load persistent stores synchronously
+            var loadError: Error?
+            container.loadPersistentStores { _, error in
+                loadError = error
+            }
+            if let loadError { throw loadError }
 
             // Create session
-            let sessionManager = try SessionManager(dbQueue: dbQueue)
+            let sessionManager = try SessionManager(container: container)
             let sessionID = sessionManager.sessionID
 
-            // Create log buffer
-            let logBuffer = LogBuffer(dbQueue: dbQueue)
+            // Create log buffer with background context
+            let bgContext = container.newBackgroundContext()
+            bgContext.mergePolicy = NSMergePolicy.mergeByPropertyObjectTrump
+            let logBuffer = LogBuffer(context: bgContext)
 
-            // HTTP collector
-            var httpCollector: HTTPCollector?
-            if config.enableHTTPCapture {
-                let collector = HTTPCollector(buffer: logBuffer, sessionID: sessionID)
-                collector.start()
-                httpCollector = collector
+            // Determine next sequence ID
+            let maxSeqID: Int64 = try bgContext.performAndWait {
+                let request = NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry")
+                request.sortDescriptors = [NSSortDescriptor(key: "sequenceID", ascending: false)]
+                request.fetchLimit = 1
+                return try bgContext.fetch(request).first?.sequenceID ?? 0
             }
+            await logBuffer.setNextSequenceID(maxSeqID + 1)
 
-            // System log collector (stdout/stderr)
-            var systemLogCollector: SystemLogCollector?
-            #if canImport(Darwin)
-            if config.enableSystemLogCapture {
-                let collector = SystemLogCollector(buffer: logBuffer, sessionID: sessionID)
-                collector.start()
-                systemLogCollector = collector
-            }
-            #endif
-
-            // OSLog collector
-            var osLogCollector: OSLogCollector?
-            if config.enableOSLogCapture {
-                let collector = OSLogCollector(buffer: logBuffer, sessionID: sessionID)
-                collector.start()
-                osLogCollector = collector
+            // Start all collectors
+            let context = CollectorContext(sink: logBuffer, sessionID: sessionID)
+            for collector in config.collectors {
+                await collector.start(context: context)
             }
 
             // Bonjour server — only on physical devices
@@ -193,7 +184,7 @@ public final class AgentLogs: Sendable {
             var bonjourAdvertiser: BonjourAdvertiser?
             #if !targetEnvironment(simulator)
             do {
-                let server = BonjourServer(dbQueue: dbQueue)
+                let server = BonjourServer(container: container)
                 try server.start()
                 bonjourServer = server
 
@@ -210,12 +201,10 @@ public final class AgentLogs: Sendable {
             #endif
 
             await state.setRunning(
-                dbQueue: dbQueue,
+                container: container,
                 sessionManager: sessionManager,
                 logBuffer: logBuffer,
-                httpCollector: httpCollector,
-                systemLogCollector: systemLogCollector,
-                osLogCollector: osLogCollector,
+                collectors: config.collectors,
                 bonjourServer: bonjourServer,
                 bonjourAdvertiser: bonjourAdvertiser,
                 configuration: config
@@ -238,7 +227,7 @@ public final class AgentLogs: Sendable {
         let entry = PendingLogEntry(
             sessionID: sessionID,
             timestamp: Date(),
-            category: .custom,
+            category: .manualLogs,
             level: type,
             message: message,
             sourceFile: sourceFile,
@@ -253,10 +242,10 @@ public final class AgentLogs: Sendable {
         // Flush buffer
         await components.logBuffer?.stop()
 
-        // Stop collectors
-        components.httpCollector?.stop()
-        components.systemLogCollector?.stop()
-        components.osLogCollector?.stop()
+        // Stop all collectors
+        for collector in components.collectors {
+            await collector.stop()
+        }
 
         // Stop server
         components.bonjourAdvertiser?.stop()

@@ -1,21 +1,67 @@
 import Foundation
-import GRDB
+import CoreData
 import AgentLogsCore
 
-/// A pending log entry before it gets an autoincremented ID from the database.
-struct PendingLogEntry: Sendable {
-    var sessionID: UUID
-    var timestamp: Date
-    var category: LogCategory
-    var level: LogLevel
-    var message: String
-    var metadata: String?
-    var sourceFile: String?
-    var sourceLine: Int?
+/// A pending log entry before it gets written to CoreData.
+public struct PendingLogEntry: Sendable {
+    public var sessionID: UUID
+    public var timestamp: Date
+    public var category: LogCategory
+    public var level: LogLevel
+    public var message: String
+    public var metadata: String?
+    public var sourceFile: String?
+    public var sourceLine: Int?
     var httpEntry: PendingHTTPEntry?
+
+    public init(
+        sessionID: UUID,
+        timestamp: Date,
+        category: LogCategory,
+        level: LogLevel,
+        message: String,
+        metadata: String? = nil,
+        sourceFile: String? = nil,
+        sourceLine: Int? = nil
+    ) {
+        self.sessionID = sessionID
+        self.timestamp = timestamp
+        self.category = category
+        self.level = level
+        self.message = message
+        self.metadata = metadata
+        self.sourceFile = sourceFile
+        self.sourceLine = sourceLine
+        self.httpEntry = nil
+    }
 }
 
-/// HTTP details that will be inserted after the log entry gets its ID.
+extension PendingLogEntry {
+    /// Internal initializer that includes httpEntry (used by HTTPCollector).
+    init(
+        sessionID: UUID,
+        timestamp: Date,
+        category: LogCategory,
+        level: LogLevel,
+        message: String,
+        metadata: String? = nil,
+        sourceFile: String? = nil,
+        sourceLine: Int? = nil,
+        httpEntry: PendingHTTPEntry?
+    ) {
+        self.sessionID = sessionID
+        self.timestamp = timestamp
+        self.category = category
+        self.level = level
+        self.message = message
+        self.metadata = metadata
+        self.sourceFile = sourceFile
+        self.sourceLine = sourceLine
+        self.httpEntry = httpEntry
+    }
+}
+
+/// HTTP details that will be inserted after the log entry.
 struct PendingHTTPEntry: Sendable {
     var method: String
     var url: String
@@ -27,16 +73,22 @@ struct PendingHTTPEntry: Sendable {
     var durationMs: Double?
 }
 
-actor LogBuffer {
-    private let dbQueue: DatabaseQueue
+actor LogBuffer: LogSink {
+    private let context: NSManagedObjectContext
     private var buffer: [PendingLogEntry] = []
     private var flushTask: Task<Void, Never>?
+    private var nextSequenceID: Int64 = 1
 
     private let maxBufferSize = 50
     private let flushIntervalNanoseconds: UInt64 = 500_000_000  // 500ms
 
-    init(dbQueue: DatabaseQueue) {
-        self.dbQueue = dbQueue
+    init(context: NSManagedObjectContext) {
+        self.context = context
+    }
+
+    /// Set the starting sequence ID (e.g., after loading max from store).
+    func setNextSequenceID(_ id: Int64) {
+        self.nextSequenceID = id
     }
 
     func append(_ entry: PendingLogEntry) {
@@ -74,52 +126,61 @@ actor LogBuffer {
         let entries = buffer
         buffer = []
 
-        do {
-            try dbQueue.write { database in
-                for entry in entries {
-                    // Insert the log entry using raw SQL so we get the autoincremented ID
-                    try database.execute(
-                        sql: """
-                            INSERT INTO logEntry (sessionID, timestamp, category, level, message, metadata, sourceFile, sourceLine)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            """,
-                        arguments: [
-                            entry.sessionID.uuidString,
-                            entry.timestamp.timeIntervalSinceReferenceDate,
-                            entry.category.rawValue,
-                            entry.level.rawValue,
-                            entry.message,
-                            entry.metadata,
-                            entry.sourceFile,
-                            entry.sourceLine,
-                        ]
-                    )
+        let context = self.context
+        var seqID = self.nextSequenceID
 
-                    if let http = entry.httpEntry {
-                        let logEntryID = database.lastInsertedRowID
-                        try database.execute(
-                            sql: """
-                                INSERT INTO httpEntry (logEntryID, method, url, requestHeaders, requestBody, statusCode, responseHeaders, responseBody, durationMs)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                            arguments: [
-                                logEntryID,
-                                http.method,
-                                http.url,
-                                http.requestHeaders,
-                                http.requestBody,
-                                http.statusCode,
-                                http.responseHeaders,
-                                http.responseBody,
-                                http.durationMs,
-                            ]
-                        )
+        context.performAndWait {
+            // Fetch the CDSession objects needed (cache by sessionID)
+            var sessionCache: [UUID: CDSession] = [:]
+
+            for entry in entries {
+                let cdSession: CDSession? = {
+                    if let cached = sessionCache[entry.sessionID] {
+                        return cached
                     }
+                    let request = NSFetchRequest<CDSession>(entityName: "CDSession")
+                    request.predicate = NSPredicate(format: "id == %@", entry.sessionID as CVarArg)
+                    request.fetchLimit = 1
+                    let result = try? context.fetch(request).first
+                    if let result {
+                        sessionCache[entry.sessionID] = result
+                    }
+                    return result
+                }()
+
+                let cdEntry = CDLogEntry(context: context)
+                cdEntry.sequenceID = seqID
+                seqID += 1
+                cdEntry.timestamp = entry.timestamp
+                cdEntry.category = entry.category.rawValue
+                cdEntry.level = entry.level.rawValue
+                cdEntry.message = entry.message
+                cdEntry.metadata = entry.metadata
+                cdEntry.sourceFile = entry.sourceFile
+                cdEntry.sourceLine = Int32(entry.sourceLine ?? 0)
+                cdEntry.session = cdSession
+
+                if let http = entry.httpEntry {
+                    let cdHTTP = CDHTTPEntry(context: context)
+                    cdHTTP.method = http.method
+                    cdHTTP.url = http.url
+                    cdHTTP.requestHeaders = http.requestHeaders
+                    cdHTTP.requestBody = http.requestBody
+                    cdHTTP.statusCode = Int32(http.statusCode ?? 0)
+                    cdHTTP.responseHeaders = http.responseHeaders
+                    cdHTTP.responseBody = http.responseBody
+                    cdHTTP.durationMs = http.durationMs ?? 0
+                    cdHTTP.logEntry = cdEntry
                 }
             }
-        } catch {
-            // Logging framework should not crash the host app, but report to stderr
-            fputs("[AgentLogs] LogBuffer flush failed: \(error)\n", stderr)
+
+            do {
+                try context.save()
+            } catch {
+                fputs("[AgentLogs] LogBuffer flush failed: \(error)\n", stderr)
+            }
         }
+
+        self.nextSequenceID = seqID
     }
 }

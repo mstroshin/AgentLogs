@@ -1,33 +1,38 @@
 import Foundation
-import GRDB
+import CoreData
 import AgentLogsCore
 
 final class SessionManager: Sendable {
-    private let dbQueue: DatabaseQueue
+    private let container: NSPersistentContainer
     private let _sessionID: UUID
 
     var sessionID: UUID { _sessionID }
 
-    init(dbQueue: DatabaseQueue) throws {
-        self.dbQueue = dbQueue
+    init(container: NSPersistentContainer) throws {
+        self.container = container
         let session = SessionManager.createSession()
         self._sessionID = session.id
-        try dbQueue.write { db in
-            try session.insert(db)
+
+        let context = container.viewContext
+        context.performAndWait {
+            let cdSession = CDSession(context: context)
+            cdSession.populate(from: session)
+            try? context.save()
         }
         installCrashHandler()
     }
 
     func endSession() {
-        do {
-            try dbQueue.write { [sessionID] db in
-                try db.execute(
-                    sql: "UPDATE session SET endedAt = ? WHERE id = ?",
-                    arguments: [Date(), sessionID.uuidString]
-                )
+        let context = container.newBackgroundContext()
+        let sid = sessionID
+        context.performAndWait {
+            let request = NSFetchRequest<CDSession>(entityName: "CDSession")
+            request.predicate = NSPredicate(format: "id == %@", sid as CVarArg)
+            request.fetchLimit = 1
+            if let cdSession = try? context.fetch(request).first {
+                cdSession.endedAt = Date()
+                try? context.save()
             }
-        } catch {
-            // Best effort — session end is non-critical
         }
     }
 
@@ -80,7 +85,7 @@ final class SessionManager: Sendable {
         sysctlbyname("hw.model", nil, &size, nil, 0)
         var model = [CChar](repeating: 0, count: size)
         sysctlbyname("hw.model", &model, &size, nil, 0)
-        return String(cString: model)
+        return String(decoding: model.prefix(while: { $0 != 0 }).map(UInt8.init), as: UTF8.self)
     }
     #endif
 
@@ -99,35 +104,38 @@ final class SessionManager: Sendable {
 
     // MARK: - Crash Handler
 
-    /// Stored reference so the handler closure can access the DB path.
-    /// Protected by a lock for thread-safe access.
     private static let crashLock = NSLock()
-    private static nonisolated(unsafe) var _activeDBQueue: DatabaseQueue?
+    private static nonisolated(unsafe) var _activeContainer: NSPersistentContainer?
     private static nonisolated(unsafe) var _activeSessionID: UUID?
 
-    private static func setActiveCrashState(dbQueue: DatabaseQueue, sessionID: UUID) {
+    private static func setActiveCrashState(container: NSPersistentContainer, sessionID: UUID) {
         crashLock.lock()
         defer { crashLock.unlock() }
-        _activeDBQueue = dbQueue
+        _activeContainer = container
         _activeSessionID = sessionID
     }
 
-    private static func getActiveCrashState() -> (DatabaseQueue, UUID)? {
+    private static func getActiveCrashState() -> (NSPersistentContainer, UUID)? {
         crashLock.lock()
         defer { crashLock.unlock() }
-        guard let db = _activeDBQueue, let sid = _activeSessionID else { return nil }
-        return (db, sid)
+        guard let container = _activeContainer, let sid = _activeSessionID else { return nil }
+        return (container, sid)
     }
 
     private func installCrashHandler() {
-        SessionManager.setActiveCrashState(dbQueue: dbQueue, sessionID: _sessionID)
+        SessionManager.setActiveCrashState(container: container, sessionID: _sessionID)
         NSSetUncaughtExceptionHandler { _ in
-            guard let (database, sid) = SessionManager.getActiveCrashState() else { return }
-            try? database.write { db in
-                try db.execute(
-                    sql: "UPDATE session SET isCrashed = 1, endedAt = ? WHERE id = ?",
-                    arguments: [Date(), sid.uuidString]
-                )
+            guard let (container, sid) = SessionManager.getActiveCrashState() else { return }
+            let context = container.newBackgroundContext()
+            context.performAndWait {
+                let request = NSFetchRequest<CDSession>(entityName: "CDSession")
+                request.predicate = NSPredicate(format: "id == %@", sid as CVarArg)
+                request.fetchLimit = 1
+                if let cdSession = try? context.fetch(request).first {
+                    cdSession.isCrashed = true
+                    cdSession.endedAt = Date()
+                    try? context.save()
+                }
             }
         }
     }

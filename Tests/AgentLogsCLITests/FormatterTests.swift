@@ -98,7 +98,7 @@ private enum TestToonFormatter {
         case .http: return "http"
         case .system: return "sys"
         case .oslog: return "osl"
-        case .custom: return "cst"
+        default: return String(category.rawValue.prefix(3))
         }
     }
 
@@ -164,7 +164,7 @@ private func makeSession(
 private func makeLogEntry(
     id: Int = 1,
     sessionID: UUID = UUID(),
-    category: LogCategory = .custom,
+    category: LogCategory = .manualLogs,
     level: LogLevel = .info,
     message: String = "Test message",
     metadata: String? = nil,
@@ -374,7 +374,7 @@ struct ToonFormatterTests {
         #expect(TestToonFormatter.shortCategory(.http) == "http")
         #expect(TestToonFormatter.shortCategory(.system) == "sys")
         #expect(TestToonFormatter.shortCategory(.oslog) == "osl")
-        #expect(TestToonFormatter.shortCategory(.custom) == "cst")
+        #expect(TestToonFormatter.shortCategory(.manualLogs) == "man")
     }
 
     @Test("Truncation at 120 characters")

@@ -1,7 +1,6 @@
 import Foundation
-import GRDB
 
-public enum LogLevel: String, Sendable, Codable, CaseIterable, DatabaseValueConvertible {
+public enum LogLevel: String, Sendable, Codable, CaseIterable {
     case debug
     case info
     case warning

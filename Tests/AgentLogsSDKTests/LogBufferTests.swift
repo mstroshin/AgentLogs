@@ -1,41 +1,36 @@
 import Testing
 import Foundation
-import GRDB
+import CoreData
 @testable import AgentLogsSDK
 import AgentLogsCore
 
 @Suite("LogBuffer")
 struct LogBufferTests {
 
-    private func makeDatabase() throws -> DatabaseQueue {
-        try DatabaseSetup.openInMemoryDatabase()
+    private func makeContainer() throws -> NSPersistentContainer {
+        let container = CoreDataStack.createInMemoryContainer()
+        var loadError: Error?
+        container.loadPersistentStores { _, error in loadError = error }
+        if let loadError { throw loadError }
+        return container
     }
 
-    /// Insert a session using raw SQL with uuidString to match the production LogBuffer patterns.
-    private func insertSessionSQL(db: DatabaseQueue, sessionID: UUID) async throws {
-        try await db.write { database in
-            try database.execute(
-                sql: """
-                    INSERT INTO session (id, appName, appVersion, bundleID, osName, osVersion, deviceModel, startedAt, endedAt, isCrashed)
-                    VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, NULL, ?)
-                    """,
-                arguments: [
-                    sessionID.uuidString,
-                    "TestApp",
-                    "macOS",
-                    "15.0",
-                    "Mac",
-                    Date().timeIntervalSinceReferenceDate,
-                    false,
-                ]
-            )
-        }
+    private func insertSession(container: NSPersistentContainer, sessionID: UUID) throws {
+        let context = container.viewContext
+        let session = CDSession(context: context)
+        session.id = sessionID
+        session.appName = "TestApp"
+        session.osName = "macOS"
+        session.osVersion = "15.0"
+        session.deviceModel = "Mac"
+        session.startedAt = Date()
+        try context.save()
     }
 
     private func makePendingEntry(
         sessionID: UUID,
         message: String = "Test message",
-        category: LogCategory = .custom,
+        category: LogCategory = .manualLogs,
         level: LogLevel = .info
     ) -> PendingLogEntry {
         PendingLogEntry(
@@ -46,30 +41,32 @@ struct LogBufferTests {
             message: message,
             metadata: nil,
             sourceFile: "Test.swift",
-            sourceLine: 1,
-            httpEntry: nil
+            sourceLine: 1
         )
     }
 
-    private func logEntryCount(db: DatabaseQueue) async throws -> Int {
-        try await db.read { database in
-            try LogEntry.fetchCount(database)
+    private func logEntryCount(container: NSPersistentContainer) throws -> Int {
+        let context = container.viewContext
+        return try context.performAndWait {
+            try context.count(for: NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry"))
         }
     }
 
-    private func httpEntryCount(db: DatabaseQueue) async throws -> Int {
-        try await db.read { database in
-            try HTTPEntry.fetchCount(database)
+    private func httpEntryCount(container: NSPersistentContainer) throws -> Int {
+        let context = container.viewContext
+        return try context.performAndWait {
+            try context.count(for: NSFetchRequest<CDHTTPEntry>(entityName: "CDHTTPEntry"))
         }
     }
 
     @Test("Buffer accumulates entries and flush writes to database")
     func flushWritesToDatabase() async throws {
-        let db = try makeDatabase()
+        let container = try makeContainer()
         let sessionID = UUID()
-        try await insertSessionSQL(db: db, sessionID: sessionID)
+        try insertSession(container: container, sessionID: sessionID)
 
-        let buffer = LogBuffer(dbQueue: db)
+        let bgContext = container.newBackgroundContext()
+        let buffer = LogBuffer(context: bgContext)
 
         await buffer.append(makePendingEntry(sessionID: sessionID, message: "Entry 1"))
         await buffer.append(makePendingEntry(sessionID: sessionID, message: "Entry 2"))
@@ -77,65 +74,70 @@ struct LogBufferTests {
 
         await buffer.flush()
 
-        // Give the detached Task time to complete the write
         try await Task.sleep(nanoseconds: 500_000_000)
 
-        let count = try await logEntryCount(db: db)
+        // Refresh view context to see background changes
+        container.viewContext.refreshAllObjects()
+        let count = try logEntryCount(container: container)
         #expect(count == 3)
     }
 
     @Test("Buffer writes when threshold reached (50 entries)")
     func bufferAutoFlushesAtThreshold() async throws {
-        let db = try makeDatabase()
+        let container = try makeContainer()
         let sessionID = UUID()
-        try await insertSessionSQL(db: db, sessionID: sessionID)
+        try insertSession(container: container, sessionID: sessionID)
 
-        let buffer = LogBuffer(dbQueue: db)
+        let bgContext = container.newBackgroundContext()
+        let buffer = LogBuffer(context: bgContext)
 
         for i in 0..<50 {
             await buffer.append(makePendingEntry(sessionID: sessionID, message: "Entry \(i)"))
         }
 
-        // Give the detached Task time to complete the write
         try await Task.sleep(nanoseconds: 1_000_000_000)
 
-        let count = try await logEntryCount(db: db)
+        container.viewContext.refreshAllObjects()
+        let count = try logEntryCount(container: container)
         #expect(count == 50)
     }
 
     @Test("Flush with empty buffer does not crash")
     func flushEmptyBuffer() async throws {
-        let db = try makeDatabase()
-        let buffer = LogBuffer(dbQueue: db)
+        let container = try makeContainer()
+        let bgContext = container.newBackgroundContext()
+        let buffer = LogBuffer(context: bgContext)
         await buffer.flush()
         #expect(Bool(true))
     }
 
     @Test("Stop flushes remaining entries")
     func stopFlushesRemaining() async throws {
-        let db = try makeDatabase()
+        let container = try makeContainer()
         let sessionID = UUID()
-        try await insertSessionSQL(db: db, sessionID: sessionID)
+        try insertSession(container: container, sessionID: sessionID)
 
-        let buffer = LogBuffer(dbQueue: db)
+        let bgContext = container.newBackgroundContext()
+        let buffer = LogBuffer(context: bgContext)
 
         await buffer.append(makePendingEntry(sessionID: sessionID, message: "Before stop"))
         await buffer.stop()
 
-        // Give the detached Task time to complete the write
         try await Task.sleep(nanoseconds: 500_000_000)
 
-        let count = try await logEntryCount(db: db)
+        container.viewContext.refreshAllObjects()
+        let count = try logEntryCount(container: container)
         #expect(count == 1)
     }
 
     @Test("Buffer flushes HTTP entries alongside log entries")
     func flushWithHTTPEntry() async throws {
-        let db = try makeDatabase()
+        let container = try makeContainer()
         let sessionID = UUID()
-        try await insertSessionSQL(db: db, sessionID: sessionID)
+        try insertSession(container: container, sessionID: sessionID)
 
-        let buffer = LogBuffer(dbQueue: db)
+        let bgContext = container.newBackgroundContext()
+        let buffer = LogBuffer(context: bgContext)
 
         let entry = PendingLogEntry(
             sessionID: sessionID,
@@ -161,11 +163,11 @@ struct LogBufferTests {
         await buffer.append(entry)
         await buffer.flush()
 
-        // Give the detached Task time to complete the write
         try await Task.sleep(nanoseconds: 500_000_000)
 
-        let logCount = try await logEntryCount(db: db)
-        let httpCount = try await httpEntryCount(db: db)
+        container.viewContext.refreshAllObjects()
+        let logCount = try logEntryCount(container: container)
+        let httpCount = try httpEntryCount(container: container)
 
         #expect(logCount == 1)
         #expect(httpCount == 1)

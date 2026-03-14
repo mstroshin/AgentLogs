@@ -25,7 +25,7 @@ enum ToonFormatter: Sendable {
         case .http: return "http"
         case .system: return "sys"
         case .oslog: return "osl"
-        case .custom: return "cst"
+        default: return String(category.rawValue.prefix(3))
         }
     }
 

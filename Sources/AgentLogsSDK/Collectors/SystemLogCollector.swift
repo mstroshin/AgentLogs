@@ -3,10 +3,10 @@ import Foundation
 import AgentLogsCore
 
 /// Captures stdout and stderr using dup2() + Pipe, preserving original output.
-final class SystemLogCollector: @unchecked Sendable {
-    private let buffer: LogBuffer
-    private let sessionID: UUID
+public final class SystemLogCollector: @unchecked Sendable, LogCollector {
+    public let category = LogCategory.system
 
+    private var context: CollectorContext?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private var originalStdout: Int32 = -1
@@ -14,15 +14,21 @@ final class SystemLogCollector: @unchecked Sendable {
     private var isCapturing = false
     private let lock = NSLock()
 
-    init(buffer: LogBuffer, sessionID: UUID) {
-        self.buffer = buffer
-        self.sessionID = sessionID
+    public init() {}
+
+    public func start(context: CollectorContext) async {
+        beginStart(context: context)
     }
 
-    func start() {
+    public func stop() async {
+        performStop()
+    }
+
+    private func beginStart(context: CollectorContext) {
         lock.lock()
         defer { lock.unlock() }
         guard !isCapturing else { return }
+        self.context = context
         isCapturing = true
 
         // Capture stdout
@@ -48,7 +54,7 @@ final class SystemLogCollector: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    private func performStop() {
         lock.lock()
         defer { lock.unlock() }
         guard isCapturing else { return }
@@ -73,6 +79,8 @@ final class SystemLogCollector: @unchecked Sendable {
             originalStderr = -1
         }
         stderrPipe = nil
+
+        context = nil
     }
 
     /// Shared helper for both stdout and stderr pipe readability handlers.
@@ -98,25 +106,38 @@ final class SystemLogCollector: @unchecked Sendable {
         let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
         guard !lines.isEmpty else { return }
 
-        // Batch all lines into a single Task instead of one Task per line
+        lock.lock()
+        guard let context else { lock.unlock(); return }
+        lock.unlock()
+
         let entries = lines.map { line in
             PendingLogEntry(
-                sessionID: sessionID,
+                sessionID: context.sessionID,
                 timestamp: Date(),
                 category: .system,
                 level: isError ? .warning : .info,
                 message: line
             )
         }
-        Task { [buffer, entries] in
+        Task {
             for entry in entries {
-                await buffer.append(entry)
+                await context.sink.append(entry)
             }
         }
     }
 
     deinit {
-        stop()
+        // Synchronous cleanup for deinit
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stderrPipe?.fileHandleForReading.readabilityHandler = nil
+        if originalStdout >= 0 {
+            dup2(originalStdout, STDOUT_FILENO)
+            close(originalStdout)
+        }
+        if originalStderr >= 0 {
+            dup2(originalStderr, STDERR_FILENO)
+            close(originalStderr)
+        }
     }
 }
 #endif

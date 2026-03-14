@@ -17,7 +17,7 @@ struct Logs: ParsableCommand, Sendable {
     @Option(name: .long, help: "Filter by log level (debug, info, warning, error, critical).")
     var level: LogLevel?
 
-    @Option(name: .long, help: "Filter by category (http, system, oslog, custom).")
+    @Option(name: .long, help: "Filter by category (http, system, oslog, manualLogs, or any plugin category).")
     var category: LogCategory?
 
     @Option(name: .long, help: "Maximum number of log entries to return.")

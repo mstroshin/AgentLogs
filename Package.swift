@@ -11,6 +11,7 @@ let package = Package(
     products: [
         .library(name: "AgentLogsCore", targets: ["AgentLogsCore"]),
         .library(name: "AgentLogsSDK", targets: ["AgentLogsSDK"]),
+        .library(name: "AgentLogsGRDBPlugin", targets: ["AgentLogsGRDBPlugin"]),
         .executable(name: "agent-logs", targets: ["AgentLogsCLI"]),
     ],
     dependencies: [
@@ -19,12 +20,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
     ],
     targets: [
-        // MARK: - Core
+        // MARK: - Core (no external dependencies)
         .target(
-            name: "AgentLogsCore",
-            dependencies: [
-                .product(name: "GRDB", package: "GRDB.swift"),
-            ]
+            name: "AgentLogsCore"
         ),
 
         // MARK: - SDK
@@ -35,6 +33,15 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
+            ]
+        ),
+
+        // MARK: - GRDB Plugin (optional, brings its own GRDB dependency)
+        .target(
+            name: "AgentLogsGRDBPlugin",
+            dependencies: [
+                "AgentLogsSDK",
+                .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
 
@@ -55,6 +62,10 @@ let package = Package(
         .testTarget(
             name: "AgentLogsSDKTests",
             dependencies: ["AgentLogsSDK"]
+        ),
+        .testTarget(
+            name: "AgentLogsGRDBPluginTests",
+            dependencies: ["AgentLogsGRDBPlugin", "AgentLogsCore"]
         ),
         .testTarget(
             name: "AgentLogsCLITests",

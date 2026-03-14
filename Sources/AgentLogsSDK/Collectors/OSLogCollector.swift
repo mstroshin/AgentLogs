@@ -6,9 +6,10 @@ import OSLog
 #endif
 
 /// Periodically reads OSLog entries and writes them to the log buffer.
-final class OSLogCollector: @unchecked Sendable {
-    private let buffer: LogBuffer
-    private let sessionID: UUID
+public final class OSLogCollector: @unchecked Sendable, LogCollector {
+    public let category = LogCategory.oslog
+
+    private var context: CollectorContext?
     private let bundleIdentifier: String
     private var pollTask: Task<Void, Never>?
     private var lastPosition: Date
@@ -18,16 +19,23 @@ final class OSLogCollector: @unchecked Sendable {
     private var logStore: OSLogStore?
     #endif
 
-    init(buffer: LogBuffer, sessionID: UUID) {
-        self.buffer = buffer
-        self.sessionID = sessionID
+    public init() {
         self.bundleIdentifier = Bundle.main.bundleIdentifier ?? ""
         self.lastPosition = Date()
     }
 
-    func start() {
+    public func start(context: CollectorContext) async {
+        beginStart(context: context)
+    }
+
+    public func stop() async {
+        performStop()
+    }
+
+    private func beginStart(context: CollectorContext) {
         lock.lock()
         defer { lock.unlock() }
+        self.context = context
         guard pollTask == nil else { return }
 
         #if canImport(OSLog)
@@ -45,11 +53,12 @@ final class OSLogCollector: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    private func performStop() {
         lock.lock()
         defer { lock.unlock() }
         pollTask?.cancel()
         pollTask = nil
+        context = nil
         #if canImport(OSLog)
         logStore = nil
         #endif
@@ -75,11 +84,18 @@ final class OSLogCollector: @unchecked Sendable {
         }
     }
 
+    private func getContext() -> CollectorContext? {
+        lock.lock()
+        defer { lock.unlock() }
+        return context
+    }
+
     private func poll() async {
         #if canImport(OSLog)
         guard #available(iOS 15.0, macOS 12.0, *) else { return }
 
         guard let (store, currentLastPosition) = getStoreAndPosition() else { return }
+        guard let context = getContext() else { return }
 
         do {
             let position = store.position(date: currentLastPosition)
@@ -109,14 +125,14 @@ final class OSLogCollector: @unchecked Sendable {
                 }()
 
                 let pending = PendingLogEntry(
-                    sessionID: sessionID,
+                    sessionID: context.sessionID,
                     timestamp: entryDate,
                     category: .oslog,
                     level: level,
                     message: logEntry.composedMessage,
                     metadata: logEntry.category.isEmpty ? nil : logEntry.category
                 )
-                await buffer.append(pending)
+                await context.sink.append(pending)
             }
 
             if latestDate > currentLastPosition {

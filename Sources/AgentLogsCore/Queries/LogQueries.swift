@@ -1,155 +1,140 @@
 import Foundation
-import GRDB
+import CoreData
 
 public enum LogQueries: Sendable {
+
     public static func fetchSessions(
-        db: Database,
+        context: NSManagedObjectContext,
         crashedOnly: Bool = false,
         limit: Int = 50,
         offset: Int = 0
     ) throws -> [Session] {
-        var sql = "SELECT * FROM session"
-        var arguments: [DatabaseValueConvertible] = []
+        let request = NSFetchRequest<CDSession>(entityName: "CDSession")
+        request.sortDescriptors = [NSSortDescriptor(key: "startedAt", ascending: false)]
+        request.fetchLimit = limit
+        request.fetchOffset = offset
 
         if crashedOnly {
-            sql += " WHERE isCrashed = ?"
-            arguments.append(true)
+            request.predicate = NSPredicate(format: "isCrashed == YES")
         }
 
-        sql += " ORDER BY startedAt DESC LIMIT ? OFFSET ?"
-        arguments.append(limit)
-        arguments.append(offset)
-
-        return try Session.fetchAll(
-            db,
-            sql: sql,
-            arguments: StatementArguments(arguments)
-        )
+        let results = try context.fetch(request)
+        return results.map { $0.toSession() }
     }
 
     public static func fetchLogs(
-        db: Database,
+        context: NSManagedObjectContext,
         sessionID: UUID,
         category: LogCategory? = nil,
         level: LogLevel? = nil,
         sinceTimestamp: Date? = nil,
         limit: Int = 500
     ) throws -> [LogEntry] {
-        var conditions: [String] = ["sessionID = ?"]
-        var arguments: [DatabaseValueConvertible] = [sessionID.uuidString]
+        let request = NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry")
+        request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: true)]
+        request.fetchLimit = limit
+
+        var predicates: [NSPredicate] = [
+            NSPredicate(format: "session.id == %@", sessionID as CVarArg)
+        ]
 
         if let category {
-            conditions.append("category = ?")
-            arguments.append(category.rawValue)
+            predicates.append(NSPredicate(format: "category == %@", category.rawValue))
         }
-
         if let level {
-            conditions.append("level = ?")
-            arguments.append(level.rawValue)
+            predicates.append(NSPredicate(format: "level == %@", level.rawValue))
         }
-
         if let sinceTimestamp {
-            conditions.append("timestamp > ?")
-            arguments.append(sinceTimestamp.timeIntervalSinceReferenceDate)
+            predicates.append(NSPredicate(format: "timestamp > %@", sinceTimestamp as NSDate))
         }
 
-        let whereClause = conditions.joined(separator: " AND ")
-        let sql = "SELECT * FROM logEntry WHERE \(whereClause) ORDER BY timestamp ASC LIMIT ?"
-        arguments.append(limit)
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
 
-        return try LogEntry.fetchAll(
-            db,
-            sql: sql,
-            arguments: StatementArguments(arguments)
-        )
+        let results = try context.fetch(request)
+        return results.map { $0.toLogEntry() }
     }
 
     public static func tailLogs(
-        db: Database,
+        context: NSManagedObjectContext,
         sessionID: UUID,
         afterID: Int
     ) throws -> [LogEntry] {
-        return try LogEntry.fetchAll(
-            db,
-            sql: "SELECT * FROM logEntry WHERE sessionID = ? AND id > ? ORDER BY id ASC",
-            arguments: [sessionID.uuidString, afterID]
-        )
+        let request = NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry")
+        request.sortDescriptors = [NSSortDescriptor(key: "sequenceID", ascending: true)]
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "session.id == %@", sessionID as CVarArg),
+            NSPredicate(format: "sequenceID > %lld", Int64(afterID)),
+        ])
+
+        let results = try context.fetch(request)
+        return results.map { $0.toLogEntry() }
     }
 
     public static func fetchHTTPEntry(
-        db: Database,
+        context: NSManagedObjectContext,
         logEntryID: Int
     ) throws -> HTTPEntry? {
-        return try HTTPEntry.fetchOne(
-            db,
-            sql: "SELECT * FROM httpEntry WHERE logEntryID = ?",
-            arguments: [logEntryID]
-        )
+        let request = NSFetchRequest<CDHTTPEntry>(entityName: "CDHTTPEntry")
+        request.predicate = NSPredicate(format: "logEntry.sequenceID == %lld", Int64(logEntryID))
+        request.fetchLimit = 1
+
+        return try context.fetch(request).first?.toHTTPEntry()
     }
 
     public static func searchLogs(
-        db: Database,
+        context: NSManagedObjectContext,
         query: String,
         sessionID: UUID? = nil,
         category: LogCategory? = nil,
         level: LogLevel? = nil,
         limit: Int = 100
     ) throws -> [LogEntry] {
-        var conditions: [String] = ["message LIKE ?"]
-        var arguments: [DatabaseValueConvertible] = ["%\(query)%"]
+        let request = NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry")
+        request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
+        request.fetchLimit = limit
+
+        var predicates: [NSPredicate] = [
+            NSPredicate(format: "message CONTAINS[cd] %@", query)
+        ]
 
         if let sessionID {
-            conditions.append("sessionID = ?")
-            arguments.append(sessionID.uuidString)
+            predicates.append(NSPredicate(format: "session.id == %@", sessionID as CVarArg))
         }
-
         if let category {
-            conditions.append("category = ?")
-            arguments.append(category.rawValue)
+            predicates.append(NSPredicate(format: "category == %@", category.rawValue))
         }
-
         if let level {
-            conditions.append("level = ?")
-            arguments.append(level.rawValue)
+            predicates.append(NSPredicate(format: "level == %@", level.rawValue))
         }
 
-        let whereClause = conditions.joined(separator: " AND ")
-        let sql = "SELECT * FROM logEntry WHERE \(whereClause) ORDER BY timestamp DESC LIMIT ?"
-        arguments.append(limit)
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: predicates)
 
-        return try LogEntry.fetchAll(
-            db,
-            sql: sql,
-            arguments: StatementArguments(arguments)
-        )
+        let results = try context.fetch(request)
+        return results.map { $0.toLogEntry() }
     }
 
-    public static func latestSessionID(db: Database) throws -> UUID? {
-        let session = try Session.fetchOne(
-            db,
-            sql: "SELECT * FROM session ORDER BY startedAt DESC LIMIT 1"
-        )
-        return session?.id
+    public static func latestSessionID(context: NSManagedObjectContext) throws -> UUID? {
+        let request = NSFetchRequest<CDSession>(entityName: "CDSession")
+        request.sortDescriptors = [NSSortDescriptor(key: "startedAt", ascending: false)]
+        request.fetchLimit = 1
+
+        return try context.fetch(request).first?.id
     }
 
     public static func fetchErrors(
-        db: Database,
+        context: NSManagedObjectContext,
         sessionID: UUID,
         limit: Int = 100
     ) throws -> [LogEntry] {
-        return try LogEntry.fetchAll(
-            db,
-            sql: """
-                SELECT * FROM logEntry
-                WHERE sessionID = ? AND level IN (?, ?)
-                ORDER BY timestamp DESC LIMIT ?
-                """,
-            arguments: [
-                sessionID.uuidString,
-                LogLevel.error.rawValue,
-                LogLevel.critical.rawValue,
-                limit,
-            ]
-        )
+        let request = NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry")
+        request.sortDescriptors = [NSSortDescriptor(key: "timestamp", ascending: false)]
+        request.fetchLimit = limit
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            NSPredicate(format: "session.id == %@", sessionID as CVarArg),
+            NSPredicate(format: "level IN %@", [LogLevel.error.rawValue, LogLevel.critical.rawValue]),
+        ])
+
+        let results = try context.fetch(request)
+        return results.map { $0.toLogEntry() }
     }
 }

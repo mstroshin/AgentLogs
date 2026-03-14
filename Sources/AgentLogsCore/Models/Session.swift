@@ -1,7 +1,6 @@
 import Foundation
-import GRDB
 
-public struct Session: Identifiable, Sendable, Codable, FetchableRecord, PersistableRecord {
+public struct Session: Identifiable, Sendable, Codable {
     public let id: UUID
     public var appName: String
     public var appVersion: String?
@@ -35,46 +34,5 @@ public struct Session: Identifiable, Sendable, Codable, FetchableRecord, Persist
         self.startedAt = startedAt
         self.endedAt = endedAt
         self.isCrashed = isCrashed
-    }
-
-    // MARK: - PersistableRecord
-
-    /// Encode UUID as TEXT (uuidString) instead of GRDB's default 16-byte BLOB.
-    public func encode(to container: inout PersistenceContainer) {
-        container["id"] = id.uuidString
-        container["appName"] = appName
-        container["appVersion"] = appVersion
-        container["bundleID"] = bundleID
-        container["osName"] = osName
-        container["osVersion"] = osVersion
-        container["deviceModel"] = deviceModel
-        container["startedAt"] = startedAt
-        container["endedAt"] = endedAt
-        container["isCrashed"] = isCrashed
-    }
-
-    // MARK: - FetchableRecord
-
-    /// Decode UUID from TEXT (uuidString) stored in the database.
-    public init(row: Row) throws {
-        let idString: String = row["id"]
-        guard let uuid = UUID(uuidString: idString) else {
-            throw DecodingError.dataCorrupted(
-                DecodingError.Context(
-                    codingPath: [],
-                    debugDescription: "Invalid UUID string '\(idString)' in session.id"
-                )
-            )
-        }
-        id = uuid
-        appName = row["appName"]
-        appVersion = row["appVersion"]
-        bundleID = row["bundleID"]
-        osName = row["osName"]
-        osVersion = row["osVersion"]
-        deviceModel = row["deviceModel"]
-        startedAt = row["startedAt"]
-        endedAt = row["endedAt"]
-        isCrashed = row["isCrashed"]
     }
 }

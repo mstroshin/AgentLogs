@@ -155,28 +155,47 @@ final class AgentLogsURLProtocol: URLProtocol, @unchecked Sendable {
 }
 
 /// Manages HTTP interception lifecycle.
-final class HTTPCollector: Sendable {
-    private let buffer: LogBuffer
-    private let sessionID: UUID
+public final class HTTPCollector: @unchecked Sendable, LogCollector {
+    public let category = LogCategory.http
 
-    init(buffer: LogBuffer, sessionID: UUID) {
-        self.buffer = buffer
-        self.sessionID = sessionID
+    private let lock = NSLock()
+    private var context: CollectorContext?
+
+    public init() {}
+
+    public func start(context: CollectorContext) async {
+        beginStart(context: context)
     }
 
-    func start() {
+    public func stop() async {
+        performStop()
+    }
+
+    private func beginStart(context: CollectorContext) {
+        lock.lock()
+        self.context = context
+        lock.unlock()
+
         AgentLogsURLProtocol.collector = self
         URLProtocol.registerClass(AgentLogsURLProtocol.self)
     }
 
-    func stop() {
+    private func performStop() {
         URLProtocol.unregisterClass(AgentLogsURLProtocol.self)
         AgentLogsURLProtocol.collector = nil
+
+        lock.lock()
+        self.context = nil
+        lock.unlock()
     }
 
     func log(message: String, level: LogLevel, httpEntry: PendingHTTPEntry) {
+        lock.lock()
+        guard let context else { lock.unlock(); return }
+        lock.unlock()
+
         let entry = PendingLogEntry(
-            sessionID: sessionID,
+            sessionID: context.sessionID,
             timestamp: Date(),
             category: .http,
             level: level,
@@ -184,7 +203,7 @@ final class HTTPCollector: Sendable {
             httpEntry: httpEntry
         )
         Task {
-            await buffer.append(entry)
+            await context.sink.append(entry)
         }
     }
 }

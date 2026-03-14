@@ -1,40 +1,39 @@
 import Foundation
+import CoreData
 import NIOCore
 import NIOPosix
 import NIOHTTP1
-import GRDB
 import AgentLogsCore
 
 /// A lightweight HTTP server using SwiftNIO that serves log data from the local database.
 final class BonjourServer: Sendable {
-    private let dbQueue: DatabaseQueue
+    private let container: NSPersistentContainer
     private let group: EventLoopGroup
-    private let lock = NSLock()
+    private let _state = LockedValue(MutableState())
+
     private struct MutableState {
         var channel: Channel?
         var port: Int = 0
     }
-    // NSLock-protected mutable state
-    private let _state = LockedValue(MutableState())
 
     var port: Int {
         _state.withLock { $0.port }
     }
 
-    init(dbQueue: DatabaseQueue) {
-        self.dbQueue = dbQueue
+    init(container: NSPersistentContainer) {
+        self.container = container
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
     @discardableResult
     func start() throws -> Int {
-        let dbQueue = self.dbQueue
+        let container = self.container
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 256)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(HTTPHandler(dbQueue: dbQueue))
+                    channel.pipeline.addHandler(HTTPHandler(container: container))
                 }
             }
             .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
@@ -82,12 +81,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
-    private let dbQueue: DatabaseQueue
+    private let container: NSPersistentContainer
     private var requestHead: HTTPRequestHead?
     private var requestBody = Data()
 
-    init(dbQueue: DatabaseQueue) {
-        self.dbQueue = dbQueue
+    init(container: NSPersistentContainer) {
+        self.container = container
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -113,17 +112,19 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let uri = head.uri
         let method = head.method
 
+        let cdContext = container.newBackgroundContext()
+
         do {
             if method == .GET && uri == "/sessions" {
-                let sessions = try dbQueue.read { db in
-                    try LogQueries.fetchSessions(db: db)
+                let sessions = try cdContext.performAndWait {
+                    try LogQueries.fetchSessions(context: cdContext)
                 }
                 sendJSON(context: context, value: sessions)
             } else if method == .POST && uri == "/logs/query" {
                 let request = try JSONDecoder().decode(LogQueryRequest.self, from: body)
-                let logs = try dbQueue.read { db in
+                let logs = try cdContext.performAndWait {
                     try LogQueries.fetchLogs(
-                        db: db,
+                        context: cdContext,
                         sessionID: request.sessionID,
                         category: request.category,
                         level: request.level,
@@ -134,9 +135,9 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 sendJSON(context: context, value: logs)
             } else if method == .POST && uri == "/logs/tail" {
                 let request = try JSONDecoder().decode(LogTailRequest.self, from: body)
-                let logs = try dbQueue.read { db in
+                let logs = try cdContext.performAndWait {
                     try LogQueries.tailLogs(
-                        db: db,
+                        context: cdContext,
                         sessionID: request.sessionID,
                         afterID: request.afterID
                     )
@@ -148,8 +149,8 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     sendError(context: context, status: .badRequest, message: "Invalid ID")
                     return
                 }
-                let entry = try dbQueue.read { db in
-                    try LogQueries.fetchHTTPEntry(db: db, logEntryID: logEntryID)
+                let entry = try cdContext.performAndWait {
+                    try LogQueries.fetchHTTPEntry(context: cdContext, logEntryID: logEntryID)
                 }
                 if let entry {
                     sendJSON(context: context, value: entry)

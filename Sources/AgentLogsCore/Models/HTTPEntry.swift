@@ -1,7 +1,6 @@
 import Foundation
-import GRDB
 
-public struct HTTPEntry: Identifiable, Sendable, Codable, FetchableRecord, PersistableRecord {
+public struct HTTPEntry: Identifiable, Sendable, Codable {
     public let logEntryID: Int
     public var method: String
     public var url: String

@@ -1,98 +1,78 @@
 import Testing
-import GRDB
+import CoreData
 @testable import AgentLogsCore
 
-@Suite("DatabaseSetup")
-struct DatabaseSetupTests {
+@Suite("CoreDataStack")
+struct CoreDataStackTests {
 
-    @Test("In-memory database opens successfully")
-    func inMemoryDatabaseOpens() throws {
-        let db = try DatabaseSetup.openInMemoryDatabase()
-        // Verify the database is usable by performing a simple read
-        let count = try db.read { db in
-            try Int.fetchOne(db, sql: "SELECT count(*) FROM sqlite_master WHERE type='table'")
-        }
-        #expect(count != nil)
-        #expect(count! > 0)
+    private func makeContainer() throws -> NSPersistentContainer {
+        let container = CoreDataStack.createInMemoryContainer()
+        var loadError: Error?
+        container.loadPersistentStores { _, error in loadError = error }
+        if let loadError { throw loadError }
+        return container
     }
 
-    @Test("Session table is created")
-    func sessionTableExists() throws {
-        let db = try DatabaseSetup.openInMemoryDatabase()
-        let exists = try db.read { db in
-            try Bool.fetchOne(
-                db,
-                sql: "SELECT count(*) > 0 FROM sqlite_master WHERE type='table' AND name='session'"
-            )
-        }
-        #expect(exists == true)
+    @Test("In-memory container opens successfully")
+    func inMemoryContainerOpens() throws {
+        let container = try makeContainer()
+        #expect(container.persistentStoreCoordinator.persistentStores.count > 0)
     }
 
-    @Test("LogEntry table is created")
-    func logEntryTableExists() throws {
-        let db = try DatabaseSetup.openInMemoryDatabase()
-        let exists = try db.read { db in
-            try Bool.fetchOne(
-                db,
-                sql: "SELECT count(*) > 0 FROM sqlite_master WHERE type='table' AND name='logEntry'"
-            )
-        }
-        #expect(exists == true)
+    @Test("CDSession entity exists")
+    func sessionEntityExists() throws {
+        let model = CoreDataStack.createModel()
+        let entity = model.entitiesByName["CDSession"]
+        #expect(entity != nil)
     }
 
-    @Test("HTTPEntry table is created")
-    func httpEntryTableExists() throws {
-        let db = try DatabaseSetup.openInMemoryDatabase()
-        let exists = try db.read { db in
-            try Bool.fetchOne(
-                db,
-                sql: "SELECT count(*) > 0 FROM sqlite_master WHERE type='table' AND name='httpEntry'"
-            )
-        }
-        #expect(exists == true)
+    @Test("CDLogEntry entity exists")
+    func logEntryEntityExists() throws {
+        let model = CoreDataStack.createModel()
+        let entity = model.entitiesByName["CDLogEntry"]
+        #expect(entity != nil)
     }
 
-    @Test("All three tables are created")
-    func allTablesCreated() throws {
-        let db = try DatabaseSetup.openInMemoryDatabase()
-        let tableNames = try db.read { db in
-            try String.fetchAll(
-                db,
-                sql: "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('session', 'logEntry', 'httpEntry') ORDER BY name"
-            )
-        }
-        #expect(tableNames == ["httpEntry", "logEntry", "session"])
+    @Test("CDHTTPEntry entity exists")
+    func httpEntryEntityExists() throws {
+        let model = CoreDataStack.createModel()
+        let entity = model.entitiesByName["CDHTTPEntry"]
+        #expect(entity != nil)
     }
 
-    @Test("Indices exist on logEntry table")
-    func indicesExist() throws {
-        let db = try DatabaseSetup.openInMemoryDatabase()
-        let indexNames = try db.read { db in
-            try String.fetchAll(
-                db,
-                sql: "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_logEntry_%' ORDER BY name"
-            )
-        }
-        #expect(indexNames.contains("idx_logEntry_sessionID"))
-        #expect(indexNames.contains("idx_logEntry_timestamp"))
-        #expect(indexNames.contains("idx_logEntry_category"))
-        #expect(indexNames.contains("idx_logEntry_level"))
-        #expect(indexNames.count == 4)
+    @Test("All three entities are created")
+    func allEntitiesCreated() throws {
+        let model = CoreDataStack.createModel()
+        let names = Set(model.entities.map { $0.name ?? "" })
+        #expect(names.contains("CDSession"))
+        #expect(names.contains("CDLogEntry"))
+        #expect(names.contains("CDHTTPEntry"))
+        #expect(model.entities.count == 3)
     }
 
-    @Test("Migrator is idempotent — running twice does not error")
-    func migratorIdempotent() throws {
-        let db = try DatabaseSetup.openInMemoryDatabase()
-        // Run migrator again on the same database
-        let migrator = DatabaseSetup.createMigrator()
-        try migrator.migrate(db)
-        // Should still have exactly 3 tables
-        let tableCount = try db.read { db in
-            try Int.fetchOne(
-                db,
-                sql: "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('session', 'logEntry', 'httpEntry')"
-            )
-        }
-        #expect(tableCount == 3)
+    @Test("Container can perform basic CRUD")
+    func basicCRUD() throws {
+        let container = try makeContainer()
+        let context = container.viewContext
+
+        let session = CDSession(context: context)
+        session.id = UUID()
+        session.appName = "Test"
+        session.osName = "macOS"
+        session.osVersion = "15.0"
+        session.deviceModel = "Mac"
+        session.startedAt = Date()
+        try context.save()
+
+        let request = NSFetchRequest<CDSession>(entityName: "CDSession")
+        let count = try context.count(for: request)
+        #expect(count == 1)
+    }
+
+    @Test("Creating container twice does not error")
+    func containerIdempotent() throws {
+        _ = try makeContainer()
+        _ = try makeContainer()
+        #expect(Bool(true))
     }
 }
