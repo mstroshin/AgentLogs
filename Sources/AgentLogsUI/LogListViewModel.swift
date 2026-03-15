@@ -11,47 +11,43 @@ final class LogListViewModel: ObservableObject {
     @Published var searchText: String = ""
     @Published var selectedCategory: LogCategory?
     @Published var selectedLevel: LogLevel?
-    @Published var isLoading = false
 
     private var context: NSManagedObjectContext?
     private var sessionID: UUID?
     private var lastSeenID: Int = 0
     private var pollTimer: Timer?
-    private var searchDebounce: AnyCancellable?
+    private var cancellables = Set<AnyCancellable>()
 
     init() {}
 
-    /// Internal init for testing — injects context and sessionID directly.
+    /// Internal init for testing.
     init(context: NSManagedObjectContext, sessionID: UUID) {
         self.context = context
         self.sessionID = sessionID
     }
 
     func start() async {
-        guard context == nil else {
-            // Already initialized (test injection)
-            reload()
-            startPolling()
-            return
+        if context == nil {
+            guard let ui = await AgentLogs.uiContext() else { return }
+            self.context = ui.context
+            self.sessionID = ui.sessionID
         }
-
-        guard let ui = await AgentLogs.uiContext() else { return }
-        self.context = ui.context
-        self.sessionID = ui.sessionID
 
         reload()
         startPolling()
-        observeSearchText()
+        setupObservers()
     }
 
     func stop() {
         pollTimer?.invalidate()
         pollTimer = nil
-        searchDebounce?.cancel()
+        cancellables.removeAll()
     }
 
     func reload() {
         guard let context, let sessionID else { return }
+
+        context.refreshAllObjects()
 
         do {
             if searchText.isEmpty {
@@ -62,9 +58,10 @@ final class LogListViewModel: ObservableObject {
                         category: selectedCategory,
                         level: selectedLevel,
                         limit: 1000
-                    )
+                    ).reversed()
                 }
             } else {
+                // searchLogs already returns DESC order
                 logs = try context.performAndWait {
                     try LogQueries.searchLogs(
                         context: context,
@@ -76,9 +73,9 @@ final class LogListViewModel: ObservableObject {
                     )
                 }
             }
-            lastSeenID = logs.last?.id ?? 0
+            lastSeenID = logs.first?.id ?? 0
         } catch {
-            // Silently handle — UI should not crash
+            // UI should not crash
         }
     }
 
@@ -101,7 +98,11 @@ final class LogListViewModel: ObservableObject {
     }
 
     private func pollForNewEntries() {
-        guard let context, let sessionID, searchText.isEmpty else { return }
+        // During search or with filters, just do a full reload to stay consistent
+        guard let context, let sessionID, searchText.isEmpty,
+              selectedCategory == nil, selectedLevel == nil else {
+            return
+        }
 
         context.refreshAllObjects()
 
@@ -114,18 +115,8 @@ final class LogListViewModel: ObservableObject {
                 )
             }
             if !newEntries.isEmpty {
-                // Apply current filters
-                let filtered: [LogEntry]
-                if selectedCategory != nil || selectedLevel != nil {
-                    filtered = newEntries.filter { entry in
-                        if let cat = selectedCategory, entry.category != cat { return false }
-                        if let lvl = selectedLevel, entry.level != lvl { return false }
-                        return true
-                    }
-                } else {
-                    filtered = newEntries
-                }
-                logs.append(contentsOf: filtered)
+                // New entries at the top (reversed to get newest first)
+                logs.insert(contentsOf: newEntries.reversed(), at: 0)
                 lastSeenID = newEntries.last?.id ?? lastSeenID
             }
         } catch {
@@ -133,15 +124,19 @@ final class LogListViewModel: ObservableObject {
         }
     }
 
-    private func observeSearchText() {
-        searchDebounce = $searchText
+    private func setupObservers() {
+        // Cancel any previous observers
+        cancellables.removeAll()
+
+        // Debounced search → full reload
+        $searchText
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
             .removeDuplicates()
-            .sink { [weak self] _ in
-                self?.reload()
-            }
+            .dropFirst() // skip initial value
+            .sink { [weak self] _ in self?.reload() }
+            .store(in: &cancellables)
 
-        // Also observe filter changes
+        // Filter changes → full reload
         $selectedCategory
             .dropFirst()
             .sink { [weak self] _ in self?.reload() }
@@ -152,7 +147,5 @@ final class LogListViewModel: ObservableObject {
             .sink { [weak self] _ in self?.reload() }
             .store(in: &cancellables)
     }
-
-    private var cancellables = Set<AnyCancellable>()
 }
 #endif
