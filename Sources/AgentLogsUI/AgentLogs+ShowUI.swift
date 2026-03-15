@@ -4,30 +4,64 @@ import SwiftUI
 import AgentLogsSDK
 
 extension AgentLogs {
-    /// Present the AgentLogs viewer from anywhere in the app.
+    /// Present the AgentLogs viewer in its own window above everything.
     ///
-    /// Finds the active window and presents a full-screen log viewer.
-    /// Call from a shake handler, debug menu button, or anywhere else:
     /// ```swift
     /// AgentLogs.showUI()
     /// ```
     @MainActor
     public static func showUI() {
+        // Prevent double-show
+        guard AgentLogsWindow.shared == nil else { return }
+
         guard let scene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
-            .first(where: { $0.activationState == .foregroundActive }),
-            let rootVC = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+            .first(where: { $0.activationState == .foregroundActive })
         else { return }
 
-        // Walk to the topmost presented controller
-        var topVC = rootVC
-        while let presented = topVC.presentedViewController {
-            topVC = presented
-        }
+        let window = AgentLogsWindow(windowScene: scene)
+        window.show()
+    }
 
-        let host = UIHostingController(rootView: AgentLogsView())
-        host.modalPresentationStyle = .fullScreen
-        topVC.present(host, animated: true)
+    /// Dismiss the AgentLogs viewer if it's currently shown.
+    @MainActor
+    public static func hideUI() {
+        AgentLogsWindow.shared?.dismiss()
+    }
+}
+
+/// A dedicated UIWindow that hosts AgentLogsView above the entire app.
+@MainActor
+private final class AgentLogsWindow: UIWindow {
+    static weak var shared: AgentLogsWindow?
+
+    init(windowScene: UIWindowScene) {
+        super.init(windowScene: windowScene)
+        windowLevel = .statusBar + 1
+
+        let logsView = AgentLogsView(onDismiss: { [weak self] in
+            self?.dismiss()
+        })
+
+        let hostVC = UIHostingController(rootView: logsView)
+        hostVC.view.backgroundColor = .systemBackground
+        rootViewController = hostVC
+
+        AgentLogsWindow.shared = self
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show() {
+        isHidden = false
+        makeKeyAndVisible()
+    }
+
+    func dismiss() {
+        isHidden = true
+        rootViewController = nil
+        AgentLogsWindow.shared = nil
     }
 }
 #endif

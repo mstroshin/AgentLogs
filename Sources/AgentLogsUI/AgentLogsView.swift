@@ -7,19 +7,28 @@ import AgentLogsSDK
 ///
 /// Usage:
 /// ```swift
-/// // Present directly:
+/// // Present via the dedicated window (recommended):
+/// AgentLogs.showUI()
+///
+/// // Or as a SwiftUI sheet:
 /// .sheet(isPresented: $showLogs) {
 ///     AgentLogsView()
 /// }
-///
-/// // Or use the SDK convenience method from anywhere:
-/// AgentLogs.showUI()
 /// ```
 public struct AgentLogsView: View {
     @StateObject private var viewModel = LogListViewModel()
     @Environment(\.dismiss) private var dismiss
 
-    public init() {}
+    /// Optional callback used by AgentLogsWindow to dismiss the overlay window.
+    private let onDismiss: (() -> Void)?
+
+    public init() {
+        self.onDismiss = nil
+    }
+
+    init(onDismiss: @escaping () -> Void) {
+        self.onDismiss = onDismiss
+    }
 
     public var body: some View {
         NavigationView {
@@ -38,7 +47,13 @@ public struct AgentLogsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Close") { dismiss() }
+                    Button("Close") {
+                        if let onDismiss {
+                            onDismiss()
+                        } else {
+                            dismiss()
+                        }
+                    }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Text("\(viewModel.logs.count) entries")
