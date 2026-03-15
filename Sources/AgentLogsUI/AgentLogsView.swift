@@ -65,6 +65,9 @@ public struct AgentLogsView: View {
         .navigationViewStyle(.stack)
         .task { await viewModel.start() }
         .onDisappear { viewModel.stop() }
+        .onChange(of: viewModel.selectedCategory) { _ in viewModel.reload() }
+        .onChange(of: viewModel.selectedLevel) { _ in viewModel.reload() }
+        .onChange(of: viewModel.searchText) { _ in viewModel.debounceReload() }
     }
 }
 #endif

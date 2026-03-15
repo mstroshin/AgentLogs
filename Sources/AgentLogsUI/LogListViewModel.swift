@@ -1,7 +1,6 @@
 #if canImport(SwiftUI) && os(iOS)
 import Foundation
 import CoreData
-import Combine
 import AgentLogsCore
 import AgentLogsSDK
 
@@ -16,7 +15,7 @@ final class LogListViewModel: ObservableObject {
     private var sessionID: UUID?
     private var lastSeenID: Int = 0
     private var pollTimer: Timer?
-    private var cancellables = Set<AnyCancellable>()
+    private var searchWorkItem: DispatchWorkItem?
 
     init() {}
 
@@ -35,13 +34,12 @@ final class LogListViewModel: ObservableObject {
 
         reload()
         startPolling()
-        setupObservers()
     }
 
     func stop() {
         pollTimer?.invalidate()
         pollTimer = nil
-        cancellables.removeAll()
+        searchWorkItem?.cancel()
     }
 
     func reload() {
@@ -61,7 +59,6 @@ final class LogListViewModel: ObservableObject {
                     ).reversed()
                 }
             } else {
-                // searchLogs already returns DESC order
                 logs = try context.performAndWait {
                     try LogQueries.searchLogs(
                         context: context,
@@ -77,6 +74,18 @@ final class LogListViewModel: ObservableObject {
         } catch {
             // UI should not crash
         }
+    }
+
+    /// Debounced reload for search text changes (300ms delay).
+    func debounceReload() {
+        searchWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.reload()
+            }
+        }
+        searchWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
     }
 
     func fetchHTTPEntry(logEntryID: Int) -> HTTPEntry? {
@@ -98,9 +107,12 @@ final class LogListViewModel: ObservableObject {
     }
 
     private func pollForNewEntries() {
-        // During search or with filters, just do a full reload to stay consistent
+        // When filters or search are active, do a full reload instead of tail
         guard let context, let sessionID, searchText.isEmpty,
               selectedCategory == nil, selectedLevel == nil else {
+            if selectedCategory != nil || selectedLevel != nil || !searchText.isEmpty {
+                reload()
+            }
             return
         }
 
@@ -115,37 +127,12 @@ final class LogListViewModel: ObservableObject {
                 )
             }
             if !newEntries.isEmpty {
-                // New entries at the top (reversed to get newest first)
                 logs.insert(contentsOf: newEntries.reversed(), at: 0)
                 lastSeenID = newEntries.last?.id ?? lastSeenID
             }
         } catch {
             // Silently handle
         }
-    }
-
-    private func setupObservers() {
-        // Cancel any previous observers
-        cancellables.removeAll()
-
-        // Debounced search → full reload
-        $searchText
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .removeDuplicates()
-            .dropFirst() // skip initial value
-            .sink { [weak self] _ in self?.reload() }
-            .store(in: &cancellables)
-
-        // Filter changes → full reload
-        $selectedCategory
-            .dropFirst()
-            .sink { [weak self] _ in self?.reload() }
-            .store(in: &cancellables)
-
-        $selectedLevel
-            .dropFirst()
-            .sink { [weak self] _ in self?.reload() }
-            .store(in: &cancellables)
     }
 }
 #endif
