@@ -33,9 +33,9 @@ extension AgentLogs {
 /// A dedicated UIWindow that hosts AgentLogsView above the entire app.
 @MainActor
 private final class AgentLogsWindow: UIWindow {
-    static weak var shared: AgentLogsWindow?
+    static var shared: AgentLogsWindow?
 
-    init(windowScene: UIWindowScene) {
+    override init(windowScene: UIWindowScene) {
         super.init(windowScene: windowScene)
         windowLevel = .statusBar + 1
 
