@@ -1,6 +1,5 @@
 #if canImport(SwiftUI) && os(iOS)
 import Foundation
-import CoreData
 import AgentLogsCore
 import AgentLogsSDK
 
@@ -11,7 +10,7 @@ final class LogListViewModel: ObservableObject {
     @Published var selectedCategory: LogCategory?
     @Published var selectedLevel: LogLevel?
 
-    private var context: NSManagedObjectContext?
+    private var store: SQLiteStore?
     private var sessionID: UUID?
     private var lastSeenID: Int = 0
     private var pollTimer: Timer?
@@ -20,15 +19,15 @@ final class LogListViewModel: ObservableObject {
     init() {}
 
     /// Internal init for testing.
-    init(context: NSManagedObjectContext, sessionID: UUID) {
-        self.context = context
+    init(store: SQLiteStore, sessionID: UUID) {
+        self.store = store
         self.sessionID = sessionID
     }
 
     func start() async {
-        if context == nil {
-            guard let ui = await AgentLogs.uiContext() else { return }
-            self.context = ui.context
+        if store == nil {
+            guard let ui = await AgentLogs.uiStore() else { return }
+            self.store = ui.store
             self.sessionID = ui.sessionID
         }
 
@@ -43,32 +42,24 @@ final class LogListViewModel: ObservableObject {
     }
 
     func reload() {
-        guard let context, let sessionID else { return }
-
-        context.refreshAllObjects()
+        guard let store, let sessionID else { return }
 
         do {
             if searchText.isEmpty {
-                logs = try context.performAndWait {
-                    try LogQueries.fetchLogs(
-                        context: context,
-                        sessionID: sessionID,
-                        category: selectedCategory,
-                        level: selectedLevel,
-                        limit: 1000
-                    ).reversed()
-                }
+                logs = try store.fetchLogs(
+                    sessionID: sessionID,
+                    category: selectedCategory,
+                    level: selectedLevel,
+                    limit: 1000
+                ).reversed()
             } else {
-                logs = try context.performAndWait {
-                    try LogQueries.searchLogs(
-                        context: context,
-                        query: searchText,
-                        sessionID: sessionID,
-                        category: selectedCategory,
-                        level: selectedLevel,
-                        limit: 500
-                    )
-                }
+                logs = try store.searchLogs(
+                    query: searchText,
+                    sessionID: sessionID,
+                    category: selectedCategory,
+                    level: selectedLevel,
+                    limit: 500
+                )
             }
             lastSeenID = logs.first?.id ?? 0
         } catch {
@@ -89,10 +80,8 @@ final class LogListViewModel: ObservableObject {
     }
 
     func fetchHTTPEntry(logEntryID: Int) -> HTTPEntry? {
-        guard let context else { return nil }
-        return try? context.performAndWait {
-            try LogQueries.fetchHTTPEntry(context: context, logEntryID: logEntryID)
-        }
+        guard let store else { return nil }
+        return try? store.fetchHTTPEntry(logEntryID: logEntryID)
     }
 
     // MARK: - Private
@@ -108,7 +97,7 @@ final class LogListViewModel: ObservableObject {
 
     private func pollForNewEntries() {
         // When filters or search are active, do a full reload instead of tail
-        guard let context, let sessionID, searchText.isEmpty,
+        guard let store, let sessionID, searchText.isEmpty,
               selectedCategory == nil, selectedLevel == nil else {
             if selectedCategory != nil || selectedLevel != nil || !searchText.isEmpty {
                 reload()
@@ -116,16 +105,11 @@ final class LogListViewModel: ObservableObject {
             return
         }
 
-        context.refreshAllObjects()
-
         do {
-            let newEntries = try context.performAndWait {
-                try LogQueries.tailLogs(
-                    context: context,
-                    sessionID: sessionID,
-                    afterID: lastSeenID
-                )
-            }
+            let newEntries = try store.tailLogs(
+                sessionID: sessionID,
+                afterID: lastSeenID
+            )
             if !newEntries.isEmpty {
                 logs.insert(contentsOf: newEntries.reversed(), at: 0)
                 lastSeenID = newEntries.last?.id ?? lastSeenID

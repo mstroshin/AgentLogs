@@ -1,79 +1,68 @@
 import Testing
 import Foundation
-import CoreData
-import os
 @testable import AgentLogsCore
 
-@Suite("LogQueries")
-struct LogQueriesTests {
+@Suite("SQLiteStore Queries")
+struct SQLiteStoreQueriesTests {
 
-    private func makeContainer() throws -> NSPersistentContainer {
-        let container = CoreDataStack.createInMemoryContainer()
-        var loadError: Error?
-        container.loadPersistentStores { _, error in loadError = error }
-        if let loadError { throw loadError }
-        return container
+    private func makeStore() throws -> SQLiteStore {
+        try SQLiteStore()
     }
 
     private func insertSession(
-        in context: NSManagedObjectContext,
+        store: SQLiteStore,
         id: UUID = UUID(),
         isCrashed: Bool = false,
         startedAt: Date = Date(timeIntervalSinceReferenceDate: 1000)
-    ) -> CDSession {
-        let session = CDSession(context: context)
-        session.id = id
-        session.appName = "TestApp"
-        session.appVersion = "1.0"
-        session.bundleID = "com.test.app"
-        session.osName = "macOS"
-        session.osVersion = "15.0.0"
-        session.deviceModel = "MacBookPro"
-        session.startedAt = startedAt
-        session.isCrashed = isCrashed
-        return session
+    ) throws -> UUID {
+        let session = Session(
+            id: id,
+            appName: "TestApp",
+            appVersion: "1.0",
+            bundleID: "com.test.app",
+            osName: "macOS",
+            osVersion: "15.0.0",
+            deviceModel: "MacBookPro",
+            startedAt: startedAt,
+            isCrashed: isCrashed
+        )
+        try store.insertSession(session)
+        return id
     }
-
-    private static let _seqCounter = OSAllocatedUnfairLock(initialState: Int64(0))
 
     @discardableResult
     private func insertLogEntry(
-        in context: NSManagedObjectContext,
-        session: CDSession,
+        store: SQLiteStore,
+        sessionID: UUID,
         category: LogCategory = .manualLogs,
         level: LogLevel = .info,
         message: String = "Test message",
         timestamp: Date = Date(timeIntervalSinceReferenceDate: 1000)
-    ) -> CDLogEntry {
-        let seqID = Self._seqCounter.withLock { value -> Int64 in
-            value += 1
-            return value
-        }
-        let entry = CDLogEntry(context: context)
-        entry.sequenceID = seqID
-        entry.timestamp = timestamp
-        entry.category = category.rawValue
-        entry.level = level.rawValue
-        entry.message = message
-        entry.sourceFile = "Test.swift"
-        entry.sourceLine = 42
-        entry.session = session
-        return entry
+    ) throws -> Int64 {
+        let entry = SQLiteStore.PendingLog(
+            sessionID: sessionID,
+            timestamp: timestamp,
+            category: category,
+            level: level,
+            message: message,
+            sourceFile: "Test.swift",
+            sourceLine: 42
+        )
+        let ids = try store.insertLogEntries([entry])
+        return ids[0]
     }
 
     // MARK: - fetchSessions
 
     @Test("fetchSessions returns all sessions ordered by startedAt DESC")
     func fetchSessionsAll() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
 
-        _ = insertSession(in: context, startedAt: Date(timeIntervalSinceReferenceDate: 1000))
-        _ = insertSession(in: context, startedAt: Date(timeIntervalSinceReferenceDate: 2000))
-        _ = insertSession(in: context, startedAt: Date(timeIntervalSinceReferenceDate: 3000))
-        try context.save()
+        try insertSession(store: store, startedAt: Date(timeIntervalSinceReferenceDate: 1000))
+        try insertSession(store: store, startedAt: Date(timeIntervalSinceReferenceDate: 2000))
+        try insertSession(store: store, startedAt: Date(timeIntervalSinceReferenceDate: 3000))
 
-        let sessions = try LogQueries.fetchSessions(context: context)
+        let sessions = try store.fetchSessions()
         #expect(sessions.count == 3)
         #expect(sessions[0].startedAt > sessions[1].startedAt)
         #expect(sessions[1].startedAt > sessions[2].startedAt)
@@ -81,38 +70,33 @@ struct LogQueriesTests {
 
     @Test("fetchSessions with crashedOnly filter")
     func fetchSessionsCrashedOnly() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
 
-        _ = insertSession(in: context, isCrashed: false)
-        _ = insertSession(in: context, isCrashed: true)
-        _ = insertSession(in: context, isCrashed: false)
-        try context.save()
+        try insertSession(store: store, isCrashed: false)
+        try insertSession(store: store, isCrashed: true)
+        try insertSession(store: store, isCrashed: false)
 
-        let crashed = try LogQueries.fetchSessions(context: context, crashedOnly: true)
+        let crashed = try store.fetchSessions(crashedOnly: true)
         #expect(crashed.count == 1)
         #expect(crashed[0].isCrashed == true)
     }
 
     @Test("fetchSessions respects limit and offset")
     func fetchSessionsLimitOffset() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
 
         for i in 0..<5 {
-            _ = insertSession(in: context, startedAt: Date(timeIntervalSinceReferenceDate: Double(i * 1000)))
+            try insertSession(store: store, startedAt: Date(timeIntervalSinceReferenceDate: Double(i * 1000)))
         }
-        try context.save()
 
-        let page = try LogQueries.fetchSessions(context: context, limit: 2, offset: 1)
+        let page = try store.fetchSessions(limit: 2, offset: 1)
         #expect(page.count == 2)
     }
 
     @Test("fetchSessions returns empty array when none exist")
     func fetchSessionsEmpty() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
-        let sessions = try LogQueries.fetchSessions(context: context)
+        let store = try makeStore()
+        let sessions = try store.fetchSessions()
         #expect(sessions.isEmpty)
     }
 
@@ -120,69 +104,61 @@ struct LogQueriesTests {
 
     @Test("fetchLogs returns entries for given session")
     func fetchLogsForSession() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
         let otherSessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        let otherSession = insertSession(in: context, id: otherSessionID)
-        insertLogEntry(in: context, session: session, message: "Mine")
-        insertLogEntry(in: context, session: otherSession, message: "Other")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertSession(store: store, id: otherSessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, message: "Mine")
+        try insertLogEntry(store: store, sessionID: otherSessionID, message: "Other")
 
-        let logs = try LogQueries.fetchLogs(context: context, sessionID: sessionID)
+        let logs = try store.fetchLogs(sessionID: sessionID)
         #expect(logs.count == 1)
         #expect(logs[0].message == "Mine")
     }
 
     @Test("fetchLogs filters by category")
     func fetchLogsFilterCategory() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, category: .http, message: "HTTP request")
-        insertLogEntry(in: context, session: session, category: .manualLogs, message: "Manual log")
-        insertLogEntry(in: context, session: session, category: .system, message: "System log")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, category: .http, message: "HTTP request")
+        try insertLogEntry(store: store, sessionID: sessionID, category: .manualLogs, message: "Manual log")
+        try insertLogEntry(store: store, sessionID: sessionID, category: .system, message: "System log")
 
-        let httpLogs = try LogQueries.fetchLogs(context: context, sessionID: sessionID, category: .http)
+        let httpLogs = try store.fetchLogs(sessionID: sessionID, category: .http)
         #expect(httpLogs.count == 1)
         #expect(httpLogs[0].message == "HTTP request")
     }
 
     @Test("fetchLogs filters by level")
     func fetchLogsFilterLevel() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, level: .info, message: "Info")
-        insertLogEntry(in: context, session: session, level: .error, message: "Error")
-        insertLogEntry(in: context, session: session, level: .debug, message: "Debug")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, level: .info, message: "Info")
+        try insertLogEntry(store: store, sessionID: sessionID, level: .error, message: "Error")
+        try insertLogEntry(store: store, sessionID: sessionID, level: .debug, message: "Debug")
 
-        let errors = try LogQueries.fetchLogs(context: context, sessionID: sessionID, level: .error)
+        let errors = try store.fetchLogs(sessionID: sessionID, level: .error)
         #expect(errors.count == 1)
         #expect(errors[0].message == "Error")
     }
 
     @Test("fetchLogs filters by sinceTimestamp")
     func fetchLogsFilterTimestamp() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, message: "Old", timestamp: Date(timeIntervalSinceReferenceDate: 1000))
-        insertLogEntry(in: context, session: session, message: "New", timestamp: Date(timeIntervalSinceReferenceDate: 3000))
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, message: "Old", timestamp: Date(timeIntervalSinceReferenceDate: 1000))
+        try insertLogEntry(store: store, sessionID: sessionID, message: "New", timestamp: Date(timeIntervalSinceReferenceDate: 3000))
 
-        let recent = try LogQueries.fetchLogs(
-            context: context, sessionID: sessionID,
+        let recent = try store.fetchLogs(
+            sessionID: sessionID,
             sinceTimestamp: Date(timeIntervalSinceReferenceDate: 2000)
         )
         #expect(recent.count == 1)
@@ -191,38 +167,34 @@ struct LogQueriesTests {
 
     @Test("fetchLogs respects limit")
     func fetchLogsLimit() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
+        try insertSession(store: store, id: sessionID)
         for i in 0..<10 {
-            insertLogEntry(in: context, session: session, message: "Entry \(i)",
-                          timestamp: Date(timeIntervalSinceReferenceDate: Double(i * 100)))
+            try insertLogEntry(store: store, sessionID: sessionID, message: "Entry \(i)",
+                              timestamp: Date(timeIntervalSinceReferenceDate: Double(i * 100)))
         }
-        try context.save()
 
-        let logs = try LogQueries.fetchLogs(context: context, sessionID: sessionID, limit: 3)
+        let logs = try store.fetchLogs(sessionID: sessionID, limit: 3)
         #expect(logs.count == 3)
     }
 
     @Test("fetchLogs with combined filters")
     func fetchLogsCombinedFilters() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, category: .http, level: .error,
-                      message: "HTTP error old", timestamp: Date(timeIntervalSinceReferenceDate: 1000))
-        insertLogEntry(in: context, session: session, category: .http, level: .error,
-                      message: "HTTP error new", timestamp: Date(timeIntervalSinceReferenceDate: 3000))
-        insertLogEntry(in: context, session: session, category: .manualLogs, level: .error,
-                      message: "Manual error new", timestamp: Date(timeIntervalSinceReferenceDate: 3000))
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, category: .http, level: .error,
+                          message: "HTTP error old", timestamp: Date(timeIntervalSinceReferenceDate: 1000))
+        try insertLogEntry(store: store, sessionID: sessionID, category: .http, level: .error,
+                          message: "HTTP error new", timestamp: Date(timeIntervalSinceReferenceDate: 3000))
+        try insertLogEntry(store: store, sessionID: sessionID, category: .manualLogs, level: .error,
+                          message: "Manual error new", timestamp: Date(timeIntervalSinceReferenceDate: 3000))
 
-        let results = try LogQueries.fetchLogs(
-            context: context, sessionID: sessionID, category: .http, level: .error,
+        let results = try store.fetchLogs(
+            sessionID: sessionID, category: .http, level: .error,
             sinceTimestamp: Date(timeIntervalSinceReferenceDate: 2000)
         )
         #expect(results.count == 1)
@@ -233,17 +205,15 @@ struct LogQueriesTests {
 
     @Test("tailLogs returns entries after a given ID")
     func tailLogsAfterID() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        let first = insertLogEntry(in: context, session: session, message: "First")
-        insertLogEntry(in: context, session: session, message: "Second")
-        insertLogEntry(in: context, session: session, message: "Third")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        let firstID = try insertLogEntry(store: store, sessionID: sessionID, message: "First")
+        try insertLogEntry(store: store, sessionID: sessionID, message: "Second")
+        try insertLogEntry(store: store, sessionID: sessionID, message: "Third")
 
-        let tail = try LogQueries.tailLogs(context: context, sessionID: sessionID, afterID: Int(first.sequenceID))
+        let tail = try store.tailLogs(sessionID: sessionID, afterID: Int(firstID))
         #expect(tail.count == 2)
         #expect(tail[0].message == "Second")
         #expect(tail[1].message == "Third")
@@ -251,15 +221,13 @@ struct LogQueriesTests {
 
     @Test("tailLogs returns empty when no new entries")
     func tailLogsEmpty() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        let last = insertLogEntry(in: context, session: session, message: "Only one")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        let lastID = try insertLogEntry(store: store, sessionID: sessionID, message: "Only one")
 
-        let tail = try LogQueries.tailLogs(context: context, sessionID: sessionID, afterID: Int(last.sequenceID))
+        let tail = try store.tailLogs(sessionID: sessionID, afterID: Int(lastID))
         #expect(tail.isEmpty)
     }
 
@@ -267,22 +235,26 @@ struct LogQueriesTests {
 
     @Test("fetchHTTPEntry returns matching entry")
     func fetchHTTPEntryFound() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        let cdLogEntry = insertLogEntry(in: context, session: session, category: .http)
+        try insertSession(store: store, id: sessionID)
+        let entry = SQLiteStore.PendingLog(
+            sessionID: sessionID,
+            timestamp: Date(timeIntervalSinceReferenceDate: 1000),
+            category: .http,
+            level: .info,
+            message: "POST /data",
+            http: SQLiteStore.PendingHTTP(
+                method: "POST",
+                url: "https://api.example.com/data",
+                statusCode: 201,
+                durationMs: 99.5
+            )
+        )
+        let ids = try store.insertLogEntries([entry])
 
-        let cdHTTP = CDHTTPEntry(context: context)
-        cdHTTP.method = "POST"
-        cdHTTP.url = "https://api.example.com/data"
-        cdHTTP.statusCode = 201
-        cdHTTP.durationMs = 99.5
-        cdHTTP.logEntry = cdLogEntry
-        try context.save()
-
-        let fetched = try LogQueries.fetchHTTPEntry(context: context, logEntryID: Int(cdLogEntry.sequenceID))
+        let fetched = try store.fetchHTTPEntry(logEntryID: Int(ids[0]))
         #expect(fetched != nil)
         #expect(fetched?.method == "POST")
         #expect(fetched?.url == "https://api.example.com/data")
@@ -291,9 +263,8 @@ struct LogQueriesTests {
 
     @Test("fetchHTTPEntry returns nil when not found")
     func fetchHTTPEntryNotFound() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
-        let result = try LogQueries.fetchHTTPEntry(context: context, logEntryID: 9999)
+        let store = try makeStore()
+        let result = try store.fetchHTTPEntry(logEntryID: 9999)
         #expect(result == nil)
     }
 
@@ -301,82 +272,72 @@ struct LogQueriesTests {
 
     @Test("searchLogs finds entries matching query")
     func searchLogsMatchingQuery() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, message: "User logged in successfully")
-        insertLogEntry(in: context, session: session, message: "Network error occurred")
-        insertLogEntry(in: context, session: session, message: "User logged out")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, message: "User logged in successfully")
+        try insertLogEntry(store: store, sessionID: sessionID, message: "Network error occurred")
+        try insertLogEntry(store: store, sessionID: sessionID, message: "User logged out")
 
-        let results = try LogQueries.searchLogs(context: context, query: "logged")
+        let results = try store.searchLogs(query: "logged")
         #expect(results.count == 2)
     }
 
     @Test("searchLogs filters by sessionID")
     func searchLogsFilterSession() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionA = UUID()
         let sessionB = UUID()
 
-        let sA = insertSession(in: context, id: sessionA)
-        let sB = insertSession(in: context, id: sessionB)
-        insertLogEntry(in: context, session: sA, message: "Error in A")
-        insertLogEntry(in: context, session: sB, message: "Error in B")
-        try context.save()
+        try insertSession(store: store, id: sessionA)
+        try insertSession(store: store, id: sessionB)
+        try insertLogEntry(store: store, sessionID: sessionA, message: "Error in A")
+        try insertLogEntry(store: store, sessionID: sessionB, message: "Error in B")
 
-        let results = try LogQueries.searchLogs(context: context, query: "Error", sessionID: sessionA)
+        let results = try store.searchLogs(query: "Error", sessionID: sessionA)
         #expect(results.count == 1)
         #expect(results[0].message == "Error in A")
     }
 
     @Test("searchLogs filters by category and level")
     func searchLogsFilterCategoryLevel() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, category: .http, level: .error, message: "HTTP failure")
-        insertLogEntry(in: context, session: session, category: .manualLogs, level: .error, message: "Manual failure")
-        insertLogEntry(in: context, session: session, category: .http, level: .info, message: "HTTP success")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, category: .http, level: .error, message: "HTTP failure")
+        try insertLogEntry(store: store, sessionID: sessionID, category: .manualLogs, level: .error, message: "Manual failure")
+        try insertLogEntry(store: store, sessionID: sessionID, category: .http, level: .info, message: "HTTP success")
 
-        let results = try LogQueries.searchLogs(context: context, query: "HTTP", category: .http, level: .error)
+        let results = try store.searchLogs(query: "HTTP", category: .http, level: .error)
         #expect(results.count == 1)
         #expect(results[0].message == "HTTP failure")
     }
 
     @Test("searchLogs returns empty for non-matching query")
     func searchLogsNoMatch() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, message: "Hello world")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, message: "Hello world")
 
-        let results = try LogQueries.searchLogs(context: context, query: "zzzznotfound")
+        let results = try store.searchLogs(query: "zzzznotfound")
         #expect(results.isEmpty)
     }
 
     @Test("searchLogs respects limit")
     func searchLogsLimit() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
+        try insertSession(store: store, id: sessionID)
         for i in 0..<10 {
-            insertLogEntry(in: context, session: session, message: "Match item \(i)")
+            try insertLogEntry(store: store, sessionID: sessionID, message: "Match item \(i)")
         }
-        try context.save()
 
-        let results = try LogQueries.searchLogs(context: context, query: "Match", limit: 3)
+        let results = try store.searchLogs(query: "Match", limit: 3)
         #expect(results.count == 3)
     }
 
@@ -384,24 +345,21 @@ struct LogQueriesTests {
 
     @Test("latestSessionID returns most recent session")
     func latestSessionIDReturnsNewest() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let oldID = UUID()
         let newID = UUID()
 
-        _ = insertSession(in: context, id: oldID, startedAt: Date(timeIntervalSinceReferenceDate: 1000))
-        _ = insertSession(in: context, id: newID, startedAt: Date(timeIntervalSinceReferenceDate: 5000))
-        try context.save()
+        try insertSession(store: store, id: oldID, startedAt: Date(timeIntervalSinceReferenceDate: 1000))
+        try insertSession(store: store, id: newID, startedAt: Date(timeIntervalSinceReferenceDate: 5000))
 
-        let latest = try LogQueries.latestSessionID(context: context)
+        let latest = try store.latestSessionID()
         #expect(latest == newID)
     }
 
     @Test("latestSessionID returns nil when no sessions")
     func latestSessionIDEmpty() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
-        let latest = try LogQueries.latestSessionID(context: context)
+        let store = try makeStore()
+        let latest = try store.latestSessionID()
         #expect(latest == nil)
     }
 
@@ -409,19 +367,17 @@ struct LogQueriesTests {
 
     @Test("fetchErrors returns only error and critical entries")
     func fetchErrorsFiltersCorrectly() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, level: .debug, message: "Debug")
-        insertLogEntry(in: context, session: session, level: .info, message: "Info")
-        insertLogEntry(in: context, session: session, level: .warning, message: "Warning")
-        insertLogEntry(in: context, session: session, level: .error, message: "Error")
-        insertLogEntry(in: context, session: session, level: .critical, message: "Critical")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, level: .debug, message: "Debug")
+        try insertLogEntry(store: store, sessionID: sessionID, level: .info, message: "Info")
+        try insertLogEntry(store: store, sessionID: sessionID, level: .warning, message: "Warning")
+        try insertLogEntry(store: store, sessionID: sessionID, level: .error, message: "Error")
+        try insertLogEntry(store: store, sessionID: sessionID, level: .critical, message: "Critical")
 
-        let errors = try LogQueries.fetchErrors(context: context, sessionID: sessionID)
+        let errors = try store.fetchErrors(sessionID: sessionID)
         #expect(errors.count == 2)
         let messages = Set(errors.map { $0.message })
         #expect(messages.contains("Error"))
@@ -430,31 +386,27 @@ struct LogQueriesTests {
 
     @Test("fetchErrors returns empty when no errors exist")
     func fetchErrorsEmpty() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
-        insertLogEntry(in: context, session: session, level: .info, message: "All good")
-        try context.save()
+        try insertSession(store: store, id: sessionID)
+        try insertLogEntry(store: store, sessionID: sessionID, level: .info, message: "All good")
 
-        let errors = try LogQueries.fetchErrors(context: context, sessionID: sessionID)
+        let errors = try store.fetchErrors(sessionID: sessionID)
         #expect(errors.isEmpty)
     }
 
     @Test("fetchErrors respects limit")
     func fetchErrorsLimit() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
 
-        let session = insertSession(in: context, id: sessionID)
+        try insertSession(store: store, id: sessionID)
         for i in 0..<10 {
-            insertLogEntry(in: context, session: session, level: .error, message: "Error \(i)")
+            try insertLogEntry(store: store, sessionID: sessionID, level: .error, message: "Error \(i)")
         }
-        try context.save()
 
-        let errors = try LogQueries.fetchErrors(context: context, sessionID: sessionID, limit: 3)
+        let errors = try store.fetchErrors(sessionID: sessionID, limit: 3)
         #expect(errors.count == 3)
     }
 }

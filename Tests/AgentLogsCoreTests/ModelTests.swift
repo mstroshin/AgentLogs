@@ -1,91 +1,41 @@
 import Testing
 import Foundation
-import CoreData
 @testable import AgentLogsCore
 
 @Suite("Model Records")
 struct ModelTests {
 
-    private func makeContainer() throws -> NSPersistentContainer {
-        let container = CoreDataStack.createInMemoryContainer()
-        var loadError: Error?
-        container.loadPersistentStores { _, error in loadError = error }
-        if let loadError { throw loadError }
-        return container
-    }
-
-    private func insertSession(
-        in context: NSManagedObjectContext,
-        id: UUID = UUID(),
-        appName: String = "TestApp",
-        appVersion: String? = "1.0",
-        bundleID: String? = "com.test.app",
-        osName: String = "macOS",
-        osVersion: String = "15.0.0",
-        deviceModel: String = "MacBookPro",
-        startedAt: Date = Date(timeIntervalSinceReferenceDate: 1000),
-        endedAt: Date? = nil,
-        isCrashed: Bool = false
-    ) -> CDSession {
-        let session = CDSession(context: context)
-        session.id = id
-        session.appName = appName
-        session.appVersion = appVersion
-        session.bundleID = bundleID
-        session.osName = osName
-        session.osVersion = osVersion
-        session.deviceModel = deviceModel
-        session.startedAt = startedAt
-        session.endedAt = endedAt
-        session.isCrashed = isCrashed
-        return session
-    }
-
-    private func insertLogEntry(
-        in context: NSManagedObjectContext,
-        session: CDSession,
-        sequenceID: Int64 = 1,
-        category: LogCategory = .manualLogs,
-        level: LogLevel = .info,
-        message: String = "Test message",
-        timestamp: Date = Date(timeIntervalSinceReferenceDate: 1000)
-    ) -> CDLogEntry {
-        let entry = CDLogEntry(context: context)
-        entry.sequenceID = sequenceID
-        entry.timestamp = timestamp
-        entry.category = category.rawValue
-        entry.level = level.rawValue
-        entry.message = message
-        entry.sourceFile = "Test.swift"
-        entry.sourceLine = 42
-        entry.session = session
-        return entry
+    private func makeStore() throws -> SQLiteStore {
+        try SQLiteStore()
     }
 
     // MARK: - Session Tests
 
-    @Test("Session can be inserted and fetched")
+    @Test("Session can be inserted and fetched via SQLiteStore")
     func sessionInsertAndFetch() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
+        let session = Session(
+            id: sessionID,
+            appName: "TestApp",
+            appVersion: "1.0",
+            bundleID: "com.test.app",
+            osName: "macOS",
+            osVersion: "15.0.0",
+            deviceModel: "MacBookPro"
+        )
+        try store.insertSession(session)
 
-        _ = insertSession(in: context, id: sessionID)
-        try context.save()
-
-        let request = NSFetchRequest<CDSession>(entityName: "CDSession")
-        request.predicate = NSPredicate(format: "id == %@", sessionID as CVarArg)
-        let fetched = try context.fetch(request).first
-
-        #expect(fetched != nil)
-        #expect(fetched?.id == sessionID)
-        #expect(fetched?.appName == "TestApp")
-        #expect(fetched?.appVersion == "1.0")
-        #expect(fetched?.bundleID == "com.test.app")
-        #expect(fetched?.osName == "macOS")
-        #expect(fetched?.osVersion == "15.0.0")
-        #expect(fetched?.deviceModel == "MacBookPro")
-        #expect(fetched?.isCrashed == false)
+        let sessions = try store.fetchSessions()
+        #expect(sessions.count == 1)
+        #expect(sessions[0].id == sessionID)
+        #expect(sessions[0].appName == "TestApp")
+        #expect(sessions[0].appVersion == "1.0")
+        #expect(sessions[0].bundleID == "com.test.app")
+        #expect(sessions[0].osName == "macOS")
+        #expect(sessions[0].osVersion == "15.0.0")
+        #expect(sessions[0].deviceModel == "MacBookPro")
+        #expect(sessions[0].isCrashed == false)
     }
 
     @Test("Session model can be created with all properties")
@@ -116,143 +66,113 @@ struct ModelTests {
         #expect(session.isCrashed == true)
     }
 
-    @Test("Session can be updated")
+    @Test("Session can be updated (end session, mark crashed)")
     func sessionUpdate() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
+        let session = Session(
+            id: sessionID,
+            appName: "TestApp",
+            osName: "macOS",
+            osVersion: "15.0",
+            deviceModel: "Mac"
+        )
+        try store.insertSession(session)
+        try store.markSessionCrashed(id: sessionID)
 
-        let cdSession = insertSession(in: context, id: sessionID)
-        try context.save()
-
-        cdSession.endedAt = Date(timeIntervalSinceReferenceDate: 2000)
-        cdSession.isCrashed = true
-        try context.save()
-
-        let request = NSFetchRequest<CDSession>(entityName: "CDSession")
-        request.predicate = NSPredicate(format: "id == %@", sessionID as CVarArg)
-        let fetched = try context.fetch(request).first
-
-        #expect(fetched?.isCrashed == true)
-        #expect(fetched?.endedAt != nil)
+        let sessions = try store.fetchSessions()
+        #expect(sessions[0].isCrashed == true)
+        #expect(sessions[0].endedAt != nil)
     }
 
     // MARK: - LogEntry Tests
 
     @Test("LogEntry can be inserted and fetched")
     func logEntryInsertAndFetch() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
+        try store.insertSession(Session(
+            id: sessionID, appName: "TestApp", osName: "macOS", osVersion: "15.0", deviceModel: "Mac"
+        ))
 
-        let cdSession = insertSession(in: context, id: sessionID)
-        let cdEntry = insertLogEntry(in: context, session: cdSession, message: "Hello world")
-        try context.save()
+        let entry = SQLiteStore.PendingLog(
+            sessionID: sessionID,
+            timestamp: Date(timeIntervalSinceReferenceDate: 1000),
+            category: .manualLogs,
+            level: .info,
+            message: "Hello world",
+            sourceFile: "Test.swift",
+            sourceLine: 42
+        )
+        try store.insertLogEntries([entry])
 
-        let logEntry = cdEntry.toLogEntry()
-        #expect(logEntry.id == 1)
-        #expect(logEntry.message == "Hello world")
-        #expect(logEntry.category == .manualLogs)
-        #expect(logEntry.level == .info)
-        #expect(logEntry.sourceFile == "Test.swift")
-        #expect(logEntry.sourceLine == 42)
+        let logs = try store.fetchLogs(sessionID: sessionID)
+        #expect(logs.count == 1)
+        #expect(logs[0].message == "Hello world")
+        #expect(logs[0].category == .manualLogs)
+        #expect(logs[0].level == .info)
+        #expect(logs[0].sourceFile == "Test.swift")
+        #expect(logs[0].sourceLine == 42)
     }
 
     @Test("Multiple log entries can be inserted for one session")
     func multipleLogEntries() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
+        try store.insertSession(Session(
+            id: sessionID, appName: "TestApp", osName: "macOS", osVersion: "15.0", deviceModel: "Mac"
+        ))
 
-        let cdSession = insertSession(in: context, id: sessionID)
-        _ = insertLogEntry(in: context, session: cdSession, sequenceID: 1, message: "First")
-        _ = insertLogEntry(in: context, session: cdSession, sequenceID: 2, message: "Second")
-        _ = insertLogEntry(in: context, session: cdSession, sequenceID: 3, message: "Third")
-        try context.save()
+        let entries = (0..<3).map { i in
+            SQLiteStore.PendingLog(
+                sessionID: sessionID,
+                timestamp: Date(timeIntervalSinceReferenceDate: Double(i * 100)),
+                category: .manualLogs,
+                level: .info,
+                message: "Entry \(i)"
+            )
+        }
+        try store.insertLogEntries(entries)
 
-        let request = NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry")
-        let count = try context.count(for: request)
-        #expect(count == 3)
+        let logs = try store.fetchLogs(sessionID: sessionID)
+        #expect(logs.count == 3)
     }
 
     // MARK: - HTTPEntry Tests
 
     @Test("HTTPEntry can be inserted and fetched")
     func httpEntryInsertAndFetch() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
+        let store = try makeStore()
         let sessionID = UUID()
+        try store.insertSession(Session(
+            id: sessionID, appName: "TestApp", osName: "macOS", osVersion: "15.0", deviceModel: "Mac"
+        ))
 
-        let cdSession = insertSession(in: context, id: sessionID)
-        let cdLogEntry = insertLogEntry(in: context, session: cdSession, category: .http)
+        let entry = SQLiteStore.PendingLog(
+            sessionID: sessionID,
+            timestamp: Date(timeIntervalSinceReferenceDate: 1000),
+            category: .http,
+            level: .info,
+            message: "GET /data",
+            http: SQLiteStore.PendingHTTP(
+                method: "GET",
+                url: "https://api.example.com/data",
+                requestHeaders: "{\"Accept\": \"application/json\"}",
+                statusCode: 200,
+                responseHeaders: "{\"Content-Type\": \"application/json\"}",
+                responseBody: "{\"ok\": true}",
+                durationMs: 123.45
+            )
+        )
+        let ids = try store.insertLogEntries([entry])
 
-        let cdHTTP = CDHTTPEntry(context: context)
-        cdHTTP.method = "GET"
-        cdHTTP.url = "https://api.example.com/data"
-        cdHTTP.requestHeaders = "{\"Accept\": \"application/json\"}"
-        cdHTTP.statusCode = 200
-        cdHTTP.responseHeaders = "{\"Content-Type\": \"application/json\"}"
-        cdHTTP.responseBody = "{\"ok\": true}"
-        cdHTTP.durationMs = 123.45
-        cdHTTP.logEntry = cdLogEntry
-        try context.save()
-
-        let httpEntry = cdHTTP.toHTTPEntry()
-        #expect(httpEntry.method == "GET")
-        #expect(httpEntry.url == "https://api.example.com/data")
-        #expect(httpEntry.statusCode == 200)
-        #expect(httpEntry.durationMs == 123.45)
-        #expect(httpEntry.responseBody == "{\"ok\": true}")
-    }
-
-    // MARK: - Cascade Delete Tests
-
-    @Test("Deleting session cascades to log entries")
-    func cascadeDeleteSessionToLogEntries() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
-        let sessionID = UUID()
-
-        let cdSession = insertSession(in: context, id: sessionID)
-        _ = insertLogEntry(in: context, session: cdSession, sequenceID: 1, message: "Entry 1")
-        _ = insertLogEntry(in: context, session: cdSession, sequenceID: 2, message: "Entry 2")
-        try context.save()
-
-        let countBefore = try context.count(for: NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry"))
-        #expect(countBefore == 2)
-
-        context.delete(cdSession)
-        try context.save()
-
-        let countAfter = try context.count(for: NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry"))
-        #expect(countAfter == 0)
-    }
-
-    @Test("Deleting log entry cascades to HTTP entry")
-    func cascadeDeleteLogEntryToHTTPEntry() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
-        let sessionID = UUID()
-
-        let cdSession = insertSession(in: context, id: sessionID)
-        let cdLogEntry = insertLogEntry(in: context, session: cdSession, category: .http)
-
-        let cdHTTP = CDHTTPEntry(context: context)
-        cdHTTP.method = "POST"
-        cdHTTP.url = "https://api.example.com/submit"
-        cdHTTP.statusCode = 201
-        cdHTTP.durationMs = 50.0
-        cdHTTP.logEntry = cdLogEntry
-        try context.save()
-
-        let httpBefore = try context.count(for: NSFetchRequest<CDHTTPEntry>(entityName: "CDHTTPEntry"))
-        #expect(httpBefore == 1)
-
-        context.delete(cdLogEntry)
-        try context.save()
-
-        let httpAfter = try context.count(for: NSFetchRequest<CDHTTPEntry>(entityName: "CDHTTPEntry"))
-        #expect(httpAfter == 0)
+        let httpEntry = try store.fetchHTTPEntry(logEntryID: Int(ids[0]))
+        #expect(httpEntry != nil)
+        #expect(httpEntry?.method == "GET")
+        #expect(httpEntry?.url == "https://api.example.com/data")
+        #expect(httpEntry?.statusCode == 200)
+        #expect(httpEntry?.durationMs == 123.45)
+        #expect(httpEntry?.responseBody == "{\"ok\": true}")
     }
 
     // MARK: - LogLevel & LogCategory
@@ -272,22 +192,6 @@ struct ModelTests {
         #expect(LogCategory.system.rawValue == "system")
         #expect(LogCategory.oslog.rawValue == "oslog")
         #expect(LogCategory.manualLogs.rawValue == "manualLogs")
-        // Backward compatibility: old "custom" entries decode correctly
         #expect(LogCategory(rawValue: "custom").rawValue == "custom")
-    }
-
-    // MARK: - toSession / toLogEntry / toHTTPEntry
-
-    @Test("CDSession.toSession produces correct struct")
-    func cdSessionToStruct() throws {
-        let container = try makeContainer()
-        let context = container.viewContext
-        let id = UUID()
-        let cdSession = insertSession(in: context, id: id, appName: "ConvertTest")
-        try context.save()
-
-        let session = cdSession.toSession()
-        #expect(session.id == id)
-        #expect(session.appName == "ConvertTest")
     }
 }

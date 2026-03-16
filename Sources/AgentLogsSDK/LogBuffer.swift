@@ -1,8 +1,7 @@
 import Foundation
-import CoreData
 import AgentLogsCore
 
-/// A pending log entry before it gets written to CoreData.
+/// A pending log entry before it gets written to the database.
 public struct PendingLogEntry: Sendable {
     public var sessionID: UUID
     public var timestamp: Date
@@ -74,21 +73,15 @@ struct PendingHTTPEntry: Sendable {
 }
 
 actor LogBuffer: LogSink {
-    private let context: NSManagedObjectContext
+    private let store: SQLiteStore
     private var buffer: [PendingLogEntry] = []
     private var flushTask: Task<Void, Never>?
-    private var nextSequenceID: Int64 = 1
 
     private let maxBufferSize = 50
     private let flushIntervalNanoseconds: UInt64 = 500_000_000  // 500ms
 
-    init(context: NSManagedObjectContext) {
-        self.context = context
-    }
-
-    /// Set the starting sequence ID (e.g., after loading max from store).
-    func setNextSequenceID(_ id: Int64) {
-        self.nextSequenceID = id
+    init(store: SQLiteStore) {
+        self.store = store
     }
 
     func append(_ entry: PendingLogEntry) {
@@ -126,61 +119,35 @@ actor LogBuffer: LogSink {
         let entries = buffer
         buffer = []
 
-        let context = self.context
-        var seqID = self.nextSequenceID
-
-        context.performAndWait {
-            // Fetch the CDSession objects needed (cache by sessionID)
-            var sessionCache: [UUID: CDSession] = [:]
-
-            for entry in entries {
-                let cdSession: CDSession? = {
-                    if let cached = sessionCache[entry.sessionID] {
-                        return cached
-                    }
-                    let request = NSFetchRequest<CDSession>(entityName: "CDSession")
-                    request.predicate = NSPredicate(format: "id == %@", entry.sessionID as CVarArg)
-                    request.fetchLimit = 1
-                    let result = try? context.fetch(request).first
-                    if let result {
-                        sessionCache[entry.sessionID] = result
-                    }
-                    return result
-                }()
-
-                let cdEntry = CDLogEntry(context: context)
-                cdEntry.sequenceID = seqID
-                seqID += 1
-                cdEntry.timestamp = entry.timestamp
-                cdEntry.category = entry.category.rawValue
-                cdEntry.level = entry.level.rawValue
-                cdEntry.message = entry.message
-                cdEntry.metadata = entry.metadata
-                cdEntry.sourceFile = entry.sourceFile
-                cdEntry.sourceLine = Int32(entry.sourceLine ?? 0)
-                cdEntry.session = cdSession
-
-                if let http = entry.httpEntry {
-                    let cdHTTP = CDHTTPEntry(context: context)
-                    cdHTTP.method = http.method
-                    cdHTTP.url = http.url
-                    cdHTTP.requestHeaders = http.requestHeaders
-                    cdHTTP.requestBody = http.requestBody
-                    cdHTTP.statusCode = Int32(http.statusCode ?? 0)
-                    cdHTTP.responseHeaders = http.responseHeaders
-                    cdHTTP.responseBody = http.responseBody
-                    cdHTTP.durationMs = http.durationMs ?? 0
-                    cdHTTP.logEntry = cdEntry
+        let pendingLogs = entries.map { entry in
+            SQLiteStore.PendingLog(
+                sessionID: entry.sessionID,
+                timestamp: entry.timestamp,
+                category: entry.category,
+                level: entry.level,
+                message: entry.message,
+                metadata: entry.metadata,
+                sourceFile: entry.sourceFile,
+                sourceLine: entry.sourceLine,
+                http: entry.httpEntry.map {
+                    SQLiteStore.PendingHTTP(
+                        method: $0.method,
+                        url: $0.url,
+                        requestHeaders: $0.requestHeaders,
+                        requestBody: $0.requestBody,
+                        statusCode: $0.statusCode,
+                        responseHeaders: $0.responseHeaders,
+                        responseBody: $0.responseBody,
+                        durationMs: $0.durationMs
+                    )
                 }
-            }
-
-            do {
-                try context.save()
-            } catch {
-                fputs("[AgentLogs] LogBuffer flush failed: \(error)\n", stderr)
-            }
+            )
         }
 
-        self.nextSequenceID = seqID
+        do {
+            try store.insertLogEntries(pendingLogs)
+        } catch {
+            fputs("[AgentLogs] LogBuffer flush failed: \(error)\n", stderr)
+        }
     }
 }

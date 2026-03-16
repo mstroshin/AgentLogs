@@ -28,7 +28,7 @@ struct DatabaseOptions: ParsableArguments, Sendable {
                 "No database found. Specify --db-path or ensure a simulator has an AgentLogs database."
             )
         }
-        return try CoreDataDataSource(path: path)
+        return try SQLiteDataSourceImpl(path: path)
     }
 }
 

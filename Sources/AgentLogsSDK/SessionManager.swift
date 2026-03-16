@@ -1,39 +1,22 @@
 import Foundation
-import CoreData
 import AgentLogsCore
 
 final class SessionManager: Sendable {
-    private let container: NSPersistentContainer
+    private let store: SQLiteStore
     private let _sessionID: UUID
 
     var sessionID: UUID { _sessionID }
 
-    init(container: NSPersistentContainer) throws {
-        self.container = container
+    init(store: SQLiteStore) throws {
+        self.store = store
         let session = SessionManager.createSession()
         self._sessionID = session.id
-
-        let context = container.viewContext
-        context.performAndWait {
-            let cdSession = CDSession(context: context)
-            cdSession.populate(from: session)
-            try? context.save()
-        }
+        try store.insertSession(session)
         installCrashHandler()
     }
 
     func endSession() {
-        let context = container.newBackgroundContext()
-        let sid = sessionID
-        context.performAndWait {
-            let request = NSFetchRequest<CDSession>(entityName: "CDSession")
-            request.predicate = NSPredicate(format: "id == %@", sid as CVarArg)
-            request.fetchLimit = 1
-            if let cdSession = try? context.fetch(request).first {
-                cdSession.endedAt = Date()
-                try? context.save()
-            }
-        }
+        try? store.endSession(id: sessionID, endedAt: Date())
     }
 
     private static func createSession() -> Session {
@@ -105,38 +88,28 @@ final class SessionManager: Sendable {
     // MARK: - Crash Handler
 
     private static let crashLock = NSLock()
-    private static nonisolated(unsafe) var _activeContainer: NSPersistentContainer?
+    private static nonisolated(unsafe) var _activeStore: SQLiteStore?
     private static nonisolated(unsafe) var _activeSessionID: UUID?
 
-    private static func setActiveCrashState(container: NSPersistentContainer, sessionID: UUID) {
+    private static func setActiveCrashState(store: SQLiteStore, sessionID: UUID) {
         crashLock.lock()
         defer { crashLock.unlock() }
-        _activeContainer = container
+        _activeStore = store
         _activeSessionID = sessionID
     }
 
-    private static func getActiveCrashState() -> (NSPersistentContainer, UUID)? {
+    private static func getActiveCrashState() -> (SQLiteStore, UUID)? {
         crashLock.lock()
         defer { crashLock.unlock() }
-        guard let container = _activeContainer, let sid = _activeSessionID else { return nil }
-        return (container, sid)
+        guard let store = _activeStore, let sid = _activeSessionID else { return nil }
+        return (store, sid)
     }
 
     private func installCrashHandler() {
-        SessionManager.setActiveCrashState(container: container, sessionID: _sessionID)
+        SessionManager.setActiveCrashState(store: store, sessionID: _sessionID)
         NSSetUncaughtExceptionHandler { _ in
-            guard let (container, sid) = SessionManager.getActiveCrashState() else { return }
-            let context = container.newBackgroundContext()
-            context.performAndWait {
-                let request = NSFetchRequest<CDSession>(entityName: "CDSession")
-                request.predicate = NSPredicate(format: "id == %@", sid as CVarArg)
-                request.fetchLimit = 1
-                if let cdSession = try? context.fetch(request).first {
-                    cdSession.isCrashed = true
-                    cdSession.endedAt = Date()
-                    try? context.save()
-                }
-            }
+            guard let (store, sid) = SessionManager.getActiveCrashState() else { return }
+            try? store.markSessionCrashed(id: sid)
         }
     }
 }

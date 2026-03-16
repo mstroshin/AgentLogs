@@ -1,5 +1,4 @@
 import Foundation
-import CoreData
 import NIOCore
 import NIOPosix
 import NIOHTTP1
@@ -7,7 +6,7 @@ import AgentLogsCore
 
 /// A lightweight HTTP server using SwiftNIO that serves log data from the local database.
 final class BonjourServer: Sendable {
-    private let container: NSPersistentContainer
+    private let store: SQLiteStore
     private let group: EventLoopGroup
     private let _state = LockedValue(MutableState())
 
@@ -20,20 +19,20 @@ final class BonjourServer: Sendable {
         _state.withLock { $0.port }
     }
 
-    init(container: NSPersistentContainer) {
-        self.container = container
+    init(store: SQLiteStore) {
+        self.store = store
         self.group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
     }
 
     @discardableResult
     func start() throws -> Int {
-        let container = self.container
+        let store = self.store
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 256)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 channel.pipeline.configureHTTPServerPipeline().flatMap {
-                    channel.pipeline.addHandler(HTTPHandler(container: container))
+                    channel.pipeline.addHandler(HTTPHandler(store: store))
                 }
             }
             .childChannelOption(.socketOption(.so_reuseaddr), value: 1)
@@ -81,12 +80,12 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
-    private let container: NSPersistentContainer
+    private let store: SQLiteStore
     private var requestHead: HTTPRequestHead?
     private var requestBody = Data()
 
-    init(container: NSPersistentContainer) {
-        self.container = container
+    init(store: SQLiteStore) {
+        self.store = store
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -112,36 +111,26 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let uri = head.uri
         let method = head.method
 
-        let cdContext = container.newBackgroundContext()
-
         do {
             if method == .GET && uri == "/sessions" {
-                let sessions = try cdContext.performAndWait {
-                    try LogQueries.fetchSessions(context: cdContext)
-                }
+                let sessions = try store.fetchSessions()
                 sendJSON(context: context, value: sessions)
             } else if method == .POST && uri == "/logs/query" {
                 let request = try JSONDecoder().decode(LogQueryRequest.self, from: body)
-                let logs = try cdContext.performAndWait {
-                    try LogQueries.fetchLogs(
-                        context: cdContext,
-                        sessionID: request.sessionID,
-                        category: request.category,
-                        level: request.level,
-                        sinceTimestamp: request.sinceTimestamp,
-                        limit: request.limit ?? 500
-                    )
-                }
+                let logs = try store.fetchLogs(
+                    sessionID: request.sessionID,
+                    category: request.category,
+                    level: request.level,
+                    sinceTimestamp: request.sinceTimestamp,
+                    limit: request.limit ?? 500
+                )
                 sendJSON(context: context, value: logs)
             } else if method == .POST && uri == "/logs/tail" {
                 let request = try JSONDecoder().decode(LogTailRequest.self, from: body)
-                let logs = try cdContext.performAndWait {
-                    try LogQueries.tailLogs(
-                        context: cdContext,
-                        sessionID: request.sessionID,
-                        afterID: request.afterID
-                    )
-                }
+                let logs = try store.tailLogs(
+                    sessionID: request.sessionID,
+                    afterID: request.afterID
+                )
                 sendJSON(context: context, value: logs)
             } else if method == .GET && uri.hasPrefix("/http/") {
                 let idString = String(uri.dropFirst("/http/".count))
@@ -149,9 +138,7 @@ private final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     sendError(context: context, status: .badRequest, message: "Invalid ID")
                     return
                 }
-                let entry = try cdContext.performAndWait {
-                    try LogQueries.fetchHTTPEntry(context: cdContext, logEntryID: logEntryID)
-                }
+                let entry = try store.fetchHTTPEntry(logEntryID: logEntryID)
                 if let entry {
                     sendJSON(context: context, value: entry)
                 } else {

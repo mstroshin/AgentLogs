@@ -1,5 +1,4 @@
 import Foundation
-import CoreData
 import AgentLogsCore
 #if canImport(OSLog)
 import OSLog
@@ -20,7 +19,7 @@ public final class AgentLogs: Sendable {
 
     /// All mutable state is protected by this actor.
     private actor State {
-        var container: NSPersistentContainer?
+        var store: SQLiteStore?
         var sessionManager: SessionManager?
         var logBuffer: LogBuffer?
         var collectors: [any LogCollector] = []
@@ -33,7 +32,7 @@ public final class AgentLogs: Sendable {
         var isRunning = false
 
         func setRunning(
-            container: NSPersistentContainer,
+            store: SQLiteStore,
             sessionManager: SessionManager,
             logBuffer: LogBuffer,
             collectors: [any LogCollector],
@@ -41,7 +40,7 @@ public final class AgentLogs: Sendable {
             bonjourAdvertiser: BonjourAdvertiser?,
             configuration: Configuration
         ) {
-            self.container = container
+            self.store = store
             self.sessionManager = sessionManager
             self.logBuffer = logBuffer
             self.collectors = collectors
@@ -76,7 +75,7 @@ public final class AgentLogs: Sendable {
                 bonjourServer: bonjourServer,
                 bonjourAdvertiser: bonjourAdvertiser
             )
-            self.container = nil
+            self.store = nil
             self.sessionManager = nil
             self.logBuffer = nil
             self.collectors = []
@@ -109,9 +108,9 @@ public final class AgentLogs: Sendable {
             sessionManager?.sessionID
         }
 
-        func uiContext() -> (NSManagedObjectContext, UUID)? {
-            guard isRunning, let container, let sm = sessionManager else { return nil }
-            return (container.viewContext, sm.sessionID)
+        func uiStore() -> (SQLiteStore, UUID)? {
+            guard isRunning, let store, let sm = sessionManager else { return nil }
+            return (store, sm.sessionID)
         }
 
         private func logLevelOrder(_ level: LogLevel) -> Int {
@@ -131,10 +130,10 @@ public final class AgentLogs: Sendable {
 
     // MARK: - Public API
 
-    /// Returns the CoreData view context and current session ID for UI consumption.
+    /// Returns the SQLiteStore and current session ID for UI consumption.
     /// Returns nil if the SDK is not running.
-    public static func uiContext() async -> (context: NSManagedObjectContext, sessionID: UUID)? {
-        await state.uiContext()
+    public static func uiStore() async -> (store: SQLiteStore, sessionID: UUID)? {
+        await state.uiStore()
     }
 
     /// Start the AgentLogs SDK with the given configuration.
@@ -175,7 +174,7 @@ public final class AgentLogs: Sendable {
         guard await !state.isRunning else { return }
 
         do {
-            // Setup CoreData
+            // Setup SQLite store
             let storePath = config.databasePath ?? DatabasePath.defaultPath()
             let storeURL = URL(fileURLWithPath: storePath)
 
@@ -183,32 +182,14 @@ public final class AgentLogs: Sendable {
             let directory = storeURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-            let container = CoreDataStack.createContainer(at: storeURL)
-
-            // Load persistent stores synchronously
-            var loadError: Error?
-            container.loadPersistentStores { _, error in
-                loadError = error
-            }
-            if let loadError { throw loadError }
+            let store = try SQLiteStore(path: storePath)
 
             // Create session
-            let sessionManager = try SessionManager(container: container)
+            let sessionManager = try SessionManager(store: store)
             let sessionID = sessionManager.sessionID
 
-            // Create log buffer with background context
-            let bgContext = container.newBackgroundContext()
-            bgContext.mergePolicy = NSMergePolicy.mergeByPropertyObjectTrump
-            let logBuffer = LogBuffer(context: bgContext)
-
-            // Determine next sequence ID
-            let maxSeqID: Int64 = try bgContext.performAndWait {
-                let request = NSFetchRequest<CDLogEntry>(entityName: "CDLogEntry")
-                request.sortDescriptors = [NSSortDescriptor(key: "sequenceID", ascending: false)]
-                request.fetchLimit = 1
-                return try bgContext.fetch(request).first?.sequenceID ?? 0
-            }
-            await logBuffer.setNextSequenceID(maxSeqID + 1)
+            // Create log buffer
+            let logBuffer = LogBuffer(store: store)
 
             // Start all collectors
             let context = CollectorContext(sink: logBuffer, sessionID: sessionID)
@@ -221,7 +202,7 @@ public final class AgentLogs: Sendable {
             var bonjourAdvertiser: BonjourAdvertiser?
             #if !targetEnvironment(simulator)
             do {
-                let server = BonjourServer(container: container)
+                let server = BonjourServer(store: store)
                 try server.start()
                 bonjourServer = server
 
@@ -238,7 +219,7 @@ public final class AgentLogs: Sendable {
             #endif
 
             await state.setRunning(
-                container: container,
+                store: store,
                 sessionManager: sessionManager,
                 logBuffer: logBuffer,
                 collectors: config.collectors,
