@@ -1,6 +1,9 @@
 import Foundation
 import CoreData
 import AgentLogsCore
+#if canImport(OSLog)
+import OSLog
+#endif
 
 /// Main public API for the AgentLogs SDK.
 ///
@@ -24,6 +27,9 @@ public final class AgentLogs: Sendable {
         var bonjourServer: BonjourServer?
         var bonjourAdvertiser: BonjourAdvertiser?
         var configuration: Configuration?
+        #if canImport(OSLog)
+        var osLogWriter: OSLogWriter?
+        #endif
         var isRunning = false
 
         func setRunning(
@@ -42,6 +48,17 @@ public final class AgentLogs: Sendable {
             self.bonjourServer = bonjourServer
             self.bonjourAdvertiser = bonjourAdvertiser
             self.configuration = configuration
+            #if canImport(OSLog)
+            if configuration.osLog.enabled {
+                let subsystem = configuration.osLog.subsystem
+                    ?? (Bundle.main.bundleIdentifier.map { "\($0).agentlogs" }
+                        ?? "com.agentlogs.output")
+                self.osLogWriter = OSLogWriter(
+                    subsystem: subsystem,
+                    category: configuration.osLog.category
+                )
+            }
+            #endif
             self.isRunning = true
         }
 
@@ -66,6 +83,9 @@ public final class AgentLogs: Sendable {
             self.bonjourServer = nil
             self.bonjourAdvertiser = nil
             self.configuration = nil
+            #if canImport(OSLog)
+            self.osLogWriter = nil
+            #endif
             self.isRunning = false
             return result
         }
@@ -73,6 +93,12 @@ public final class AgentLogs: Sendable {
         func appendLog(_ entry: PendingLogEntry) async {
             await logBuffer?.append(entry)
         }
+
+        #if canImport(OSLog)
+        func writeToOSLog(_ message: String, level: LogLevel) {
+            osLogWriter?.write(message, level: level)
+        }
+        #endif
 
         func shouldLog(level: LogLevel) -> Bool {
             guard isRunning, let config = configuration else { return false }
@@ -233,6 +259,10 @@ public final class AgentLogs: Sendable {
     ) async {
         guard await state.shouldLog(level: type) else { return }
         guard let sessionID = await state.currentSessionID() else { return }
+
+        #if canImport(OSLog)
+        await state.writeToOSLog(message, level: type)
+        #endif
 
         let sourceFile = (file as NSString).lastPathComponent
         let entry = PendingLogEntry(
